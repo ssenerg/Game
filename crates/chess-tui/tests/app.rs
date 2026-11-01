@@ -357,9 +357,21 @@ fn pairing_plays_the_computer_at_the_level_chosen() {
         ),
         "{effects:?}"
     );
-    assert_eq!(app.screen, Screen::Joining { by_code: false });
+    assert_eq!(app.screen, Screen::JoiningBots);
+    // Refused, or turned away on the way in: back to quick play.
+    app.join_failed("Too fast.".into());
+    let Screen::Home { selected } = app.screen else {
+        panic!("{:?}", app.screen);
+    };
+    assert_eq!(app.home_items()[selected], HomeItem::QuickPlay);
+    app.handle(Key::Enter);
+    app.handle(Key::Enter);
+    assert_eq!(app.screen, Screen::JoiningBots);
     app.bots_failed("Try again.".into());
-    assert!(matches!(app.screen, Screen::Home { .. }));
+    let Screen::Home { selected } = app.screen else {
+        panic!("{:?}", app.screen);
+    };
+    assert_eq!(app.home_items()[selected], HomeItem::QuickPlay);
     app.handle(Key::Enter);
     let effects = click(&mut app, Hit::Preset(0));
     assert!(
@@ -446,6 +458,17 @@ fn a_host_plays_the_computer_at_a_level_they_set() {
         .collect();
     assert_eq!(levels, [4, 5]);
     assert_eq!(chess(&mut app).prefs.challenge.level, 5, "kept");
+    // With two people in the room, the level is only shown.
+    let mut full = app_in(ANN, room(TimeControl::minutes(5, 3)).view());
+    typed(&mut full, "e");
+    let effects = keys(&mut full, &[Key::Down, Key::Down, Key::Down, Key::Right]);
+    assert_eq!(challenged(&effects), None, "nobody un-readied for nothing");
+    let screen = shown(&full, 80, 24);
+    let row = screen
+        .lines()
+        .find(|l| l.contains("Computer level"))
+        .unwrap();
+    assert!(row.contains('3') && !row.contains('◂'), "{screen}");
     // Its seat says its level in the game.
     let mut room = against_computer(4);
     room.toggle_ready(ANN);

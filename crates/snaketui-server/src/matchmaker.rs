@@ -61,6 +61,9 @@ pub struct Dequeue(pub PlayerId);
 pub struct BotMatch {
     pub pool: PoolKey,
     pub who: Entrant,
+    /// Theirs if signed in, so the room keeps their seat if their
+    /// connection drops, as a matched room with people does.
+    pub account: Option<AccountId>,
     pub presence: Presence,
     pub reply: Recipient<Matched>,
     pub choice: Vec<u8>,
@@ -563,6 +566,7 @@ impl Handler<BotMatch> for MatchmakerActor {
         // No ratings: nothing about it is saved.
         let setup = RoomSetup {
             present: HashMap::from([(id, msg.presence)]),
+            accounts: msg.account.map(|a| (id, a)).into_iter().collect(),
             ..RoomSetup::default()
         };
         let (room, view) = room.start(&self.host, self.host.new_id(), setup);

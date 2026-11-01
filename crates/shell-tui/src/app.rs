@@ -45,6 +45,8 @@ pub enum Screen {
     Leaderboard { category: usize },
     /// On the way to watching a friend's game.
     JoiningToWatch,
+    /// On the way into a match against bots.
+    JoiningBots,
     /// The open game's own screens, such as Snake's single player, or a
     /// room's rules.
     Game,
@@ -373,7 +375,7 @@ impl App {
             Screen::Input(field) => self.input_key(field, key, effects),
             Screen::Finding => self.finding_key(key, effects),
             // Nothing to do until the room answers.
-            Screen::Joining { .. } | Screen::JoiningToWatch => {}
+            Screen::Joining { .. } | Screen::JoiningToWatch | Screen::JoiningBots => {}
             Screen::Room => self.room_key(raw, effects),
             Screen::Form(kind) => self.form_key(kind, key, effects),
             Screen::Account { selected } => self.account_key(selected, key, effects),
@@ -396,7 +398,7 @@ impl App {
             Next::Queue(pool) => self.queue(id, pool, effects),
             Next::PlayBots(pool) => {
                 self.online.confirm_small = false;
-                self.screen = Screen::Joining { by_code: false };
+                self.screen = Screen::JoiningBots;
                 effects.push(self.play_bots(i, pool));
             }
         }
@@ -679,10 +681,7 @@ impl App {
 
     /// A match against bots couldn't start; `why` says so.
     pub fn bots_failed(&mut self, why: String) {
-        if matches!(
-            self.screen,
-            Screen::Finding | Screen::Joining { by_code: false }
-        ) {
+        if matches!(self.screen, Screen::Finding | Screen::JoiningBots) {
             self.go_home(HomeItem::QuickPlay, Some(why));
         }
     }
@@ -1205,7 +1204,8 @@ impl App {
         }
     }
 
-    /// Making or joining a private room didn't work.
+    /// Making or joining a private room, or a match against bots, didn't
+    /// work.
     pub fn join_failed(&mut self, why: String) {
         match self.screen {
             Screen::Joining { by_code: true } => {
@@ -1213,6 +1213,7 @@ impl App {
                 self.screen = Screen::Input(Field::Code);
             }
             Screen::Joining { by_code: false } => self.go_home(HomeItem::CreateRoom, Some(why)),
+            Screen::JoiningBots => self.bots_failed(why),
             _ => {}
         }
     }

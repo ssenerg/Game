@@ -286,6 +286,11 @@ pub(crate) fn has_computer(view: &RoomView<Chess>) -> bool {
     view.shell.seats.iter().any(|s| is_bot(s.who.id))
 }
 
+/// Whether the computer plays here, or could: its level means something.
+pub(crate) fn computer_fits(view: &RoomView<Chess>) -> bool {
+    has_computer(view) || view.shell.seats.len() < view.shell.max_players
+}
+
 /// Where the host's side leaves everyone, from `me`'s chair.
 fn sides(side: Side, host: &str, hosting: bool) -> String {
     match (side, hosting) {
@@ -780,6 +785,8 @@ impl ChessUi {
                     0 => settings.control = prefs::step_base(settings.control, back),
                     1 => settings.control = prefs::step_increment(settings.control, back),
                     2 => settings.side = prefs::step_side(settings.side, back),
+                    // Two people: a level would only un-ready them.
+                    _ if !computer_fits(view) => return Reply::default(),
                     _ => settings.level = prefs::step_level(settings.level, back),
                 }
                 if settings == was {

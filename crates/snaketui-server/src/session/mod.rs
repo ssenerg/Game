@@ -924,18 +924,23 @@ impl SessionActor {
     }
 
     /// Into a match against `game`'s bots at `pool`, out of the queue if
-    /// waiting there.
+    /// waiting there. They count as queued until a match comes, since one
+    /// made meanwhile may yet fall through.
     fn play_bots(&mut self, game: GameId, pool: &str, choice: Vec<u8>, ctx: &mut Context<Self>) {
         if self.room.is_some() {
-            return;
+            if let Some(app) = self.app.as_mut() {
+                app.bots_failed(TRY_AGAIN.to_string());
+            }
+            return self.render(ctx);
         }
-        let queued = self.queued.take().is_some();
+        let queued = self.queued.is_some();
         let asked = self.shared.matchmaker.send(BotMatch {
             pool: PoolKey {
                 game,
                 pool: pool.to_string(),
             },
             who: self.entrant(),
+            account: self.account_id(),
             presence: Arc::downgrade(&self.presence),
             reply: ctx.address().recipient(),
             choice,
@@ -946,6 +951,7 @@ impl SessionActor {
                 return;
             }
             // Still in the queue, perhaps: out of it too.
+            act.queued = None;
             act.shared.matchmaker.do_send(Dequeue(act.id));
             if let Some(app) = act.app.as_mut() {
                 app.bots_failed(TRY_AGAIN.to_string());
@@ -1039,7 +1045,10 @@ impl SessionActor {
     /// meanwhile, they give it straight back.
     fn entered(&mut self, room: RoomHandle, view: ViewRx, ctx: &mut Context<Self>) {
         let wanted = self.app.as_ref().is_some_and(|a| {
-            matches!(a.screen, Screen::Finding | Screen::Joining { .. }) && !a.in_room()
+            matches!(
+                a.screen,
+                Screen::Finding | Screen::Joining { .. } | Screen::JoiningBots
+            ) && !a.in_room()
         });
         if self.closing || !wanted || self.room.is_some() {
             room.leave(self.id);
@@ -1277,7 +1286,7 @@ impl SessionActor {
         if let Some(app) = self.app.as_mut() {
             let why = TOO_FAST.to_string();
             match app.screen {
-                Screen::Joining { .. } => app.join_failed(why),
+                Screen::Joining { .. } | Screen::JoiningBots => app.join_failed(why),
                 Screen::JoiningToWatch => app.watch_failed(why),
                 Screen::Form(_) => app.form_failed(why),
                 _ => app.notify(why),

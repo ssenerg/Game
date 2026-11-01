@@ -67,6 +67,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
             home::draw(frame, app, home(HomeItem::QuickPlay));
             dialogs::draw_finding(frame, app);
         }
+        Screen::JoiningBots => {
+            home::draw(frame, app, home(HomeItem::QuickPlay));
+            dialogs::draw_joining(frame);
+        }
         Screen::Joining { by_code } => {
             let item = if by_code {
                 HomeItem::JoinCode

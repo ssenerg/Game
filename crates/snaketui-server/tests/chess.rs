@@ -423,3 +423,26 @@ async fn a_host_plays_the_computer_in_a_private_room() {
     ann.send(ENTER).await;
     a_move_and_the_computer_answers(&mut ann).await;
 }
+
+#[tokio::test]
+async fn a_dropped_player_comes_back_to_their_game_against_the_computer() {
+    let server = chess_server();
+    let (mut ann, key) = account(server.addr, "ann").await;
+    ann.send(DOWN).await;
+    ann.send(ENTER).await;
+    ann.wait_for("Quick pairing").await;
+    for key in [DOWN, DOWN, DOWN, RIGHT] {
+        ann.send(key).await;
+    }
+    ann.wait_for("◂ the computer, level 1 ▸").await;
+    ann.send(ENTER).await;
+    ann.wait_for("Computer · level 1").await;
+    a_move_and_the_computer_answers(&mut ann).await;
+    drop(ann);
+
+    // Her seat waited, and the game is still hers, her move.
+    let mut ann = back(server.addr, &key).await;
+    ann.wait_for("Computer · level 1").await;
+    ann.wait_for("Your move").await;
+    assert!(!ann.text().contains("RESULTS"), "{}", ann.text());
+}

@@ -97,11 +97,10 @@ impl GameServer for ChessServer {
         who: Entrant,
         choice: &[u8],
     ) -> Option<Box<dyn NewRoom>> {
-        let level = decode::<u8>(choice).filter(|level| LEVELS.contains(level));
         let chess = ChessSettings {
             control: preset(pool)?,
             side: Side::Random,
-            level: level.unwrap_or(ChessSettings::default().level),
+            level: level(choice),
         };
         let room = settings(chess, RoomKind::Match)?;
         let players = vec![who, Chess::bot(0)];
@@ -121,9 +120,33 @@ impl GameServer for ChessServer {
     }
 }
 
+/// The computer's level a player chose, as chess's screens wrote it; the
+/// usual one if it makes no sense.
+fn level(choice: &[u8]) -> u8 {
+    decode::<u8>(choice)
+        .filter(|level| LEVELS.contains(level))
+        .unwrap_or(ChessSettings::default().level)
+}
+
 #[cfg(test)]
 mod tests {
+    use game_api::codec::encode;
+
     use super::*;
+
+    #[test]
+    fn the_computer_plays_at_the_level_chosen_or_else_the_usual_one() {
+        assert_eq!(level(&encode(&5u8)), 5);
+        assert_eq!(level(&encode(&1u8)), 1);
+        assert_eq!(level(&encode(&9u8)), 3);
+        assert_eq!(level(&encode(&0u8)), 3);
+        assert_eq!(level(&[]), 3);
+        let who = Entrant {
+            id: 1,
+            name: "ann".into(),
+        };
+        assert!(ChessServer.bot_match(&INFO.pools[0], 1, who, &[]).is_some());
+    }
 
     #[test]
     fn every_preset_has_a_pool_rated_in_its_category() {

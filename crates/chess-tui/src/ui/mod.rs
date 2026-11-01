@@ -19,7 +19,8 @@ use shell_tui::Ctx;
 use shell_tui::ui::{centered_rect, dim};
 
 use crate::app::{
-    CHALLENGE_ROWS, ChessScreen, ChessUi, Hit, RATINGS, chess_view, pairing_rows, speed,
+    CHALLENGE_ROWS, ChessScreen, ChessUi, Hit, RATINGS, chess_view, computer_fits, pairing_rows,
+    speed,
 };
 use crate::prefs::{BoardLook, MoveInput, PieceStyle, Prefs};
 
@@ -379,7 +380,7 @@ fn draw_challenge(frame: &mut Frame, ui: &ChessUi, ctx: &Ctx, selected: usize) {
             "Computer level",
             &settings.level.to_string(),
             selected == 3,
-            hosting,
+            hosting && computer_fits(view),
         ),
         Line::default(),
         Line::styled(

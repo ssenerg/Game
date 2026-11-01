@@ -334,6 +334,9 @@ pub struct RoomSetup {
     pub present: HashMap<PlayerId, Presence>,
     /// Rated rooms: whom to rate, and where.
     pub ratings: Option<Ratings>,
+    /// The accounts of players already seated, in a matched room that
+    /// isn't rated; a rated room knows them from [`RoomSetup::ratings`].
+    pub accounts: HashMap<PlayerId, AccountId>,
 }
 
 /// A room to join and play in, wherever it runs.
@@ -584,17 +587,19 @@ impl<G: Served> RoomActor<G> {
             code,
             present,
             ratings,
+            mut accounts,
         } = setup;
         let (code, lobby) = code.unzip();
         let pings = HashMap::new();
         let away = HashMap::new();
         let first: Arc<dyn AnyRoomView> = Arc::new(view_of(&room, &code, &[], &pings, &away, 0));
         // A matched room knows its players' accounts from the start.
-        let accounts = ratings
-            .iter()
-            .flat_map(|r| &r.members)
-            .filter_map(|(&id, m)| Some((id, m.account?)))
-            .collect();
+        accounts.extend(
+            ratings
+                .iter()
+                .flat_map(|r| &r.members)
+                .filter_map(|(&id, m)| Some((id, m.account?))),
+        );
         let (view, rx) = watch::channel(first);
         let now = Instant::now();
         let room = Self {
