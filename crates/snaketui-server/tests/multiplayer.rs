@@ -34,7 +34,7 @@ async fn pick(p: &Player, n: usize) {
 
 async fn quick_play(p: &mut Player) {
     pick(p, 1).await;
-    p.wait_for("Finding a match").await;
+    snake_queue(p).await;
 }
 
 /// The first seed whose first round, played with nobody pressing a key,

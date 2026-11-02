@@ -49,24 +49,50 @@ pub fn bot_names() -> &'static [&'static str] {
     &BOT_NAMES
 }
 
-/// Quick play's one pool, every snake for itself, which the server matches
-/// players in.
+/// Quick play's classic pool, every snake for itself, which the server
+/// matches players in.
 pub const QUICK_POOL: &str = "ffa";
 
-/// The rating quick play's matches change.
+/// The rating quick play's classic matches change.
 pub const QUICK_RATING: RatingKey = RatingKey {
     game: GameId::Snake,
     category: QUICK_POOL,
 };
 
-/// The board every quick-play match uses. With the scoreboard beside it, it
-/// fits an 80×23 terminal (80×24 with a tmux status bar).
+/// Quick play's pool with guns, rated apart.
+pub const GUNS_POOL: &str = "guns";
+
+/// The rating its matches change.
+pub const GUNS_RATING: RatingKey = RatingKey {
+    game: GameId::Snake,
+    category: GUNS_POOL,
+};
+
+/// The board every classic quick-play match uses. With the scoreboard
+/// beside it, it fits an 80×23 terminal (80×24 with a tmux status bar).
 pub fn quick_rules() -> Rules {
     Rules {
         width: 30,
         height: 18,
         ..Rules::default()
     }
+}
+
+/// The same board, with guns, for quick play's guns pool.
+pub fn quick_guns_rules() -> Rules {
+    Rules {
+        guns: true,
+        ..quick_rules()
+    }
+}
+
+/// What a player does to their snake in a round.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum SnakeInput {
+    Turn(Direction),
+    /// Fires the gun it holds, if any.
+    Fire,
 }
 
 /// Snake, as rooms play it: moves on the tick and no boost, with a snake
@@ -78,7 +104,7 @@ impl Game for Snake {
     const BOT_NAMES: &'static [&'static str] = &BOT_NAMES;
 
     type Settings = Rules;
-    type Input = Direction;
+    type Input = SnakeInput;
     type View = RoundView;
     type Round = SnakeRound;
 
@@ -231,16 +257,19 @@ impl game_api::Round<Snake> for SnakeRound {
         time_up.then(|| self.end(true, true))
     }
 
-    /// Queues a turn for this player's snake. Turns made during the
-    /// countdown are taken on the first ticks.
+    /// Queues a turn for this player's snake, or fires its gun on the next
+    /// tick. Turns made during the countdown are taken on the first ticks.
     fn input(
         &mut self,
         slot: u8,
-        dir: Direction,
+        input: SnakeInput,
         _: Duration,
         _: Option<Duration>,
     ) -> Option<RoundEnd> {
-        self.world.steer(slot, dir);
+        match input {
+            SnakeInput::Turn(dir) => self.world.steer(slot, dir),
+            SnakeInput::Fire => self.world.fire(slot),
+        };
         None
     }
 
@@ -304,6 +333,9 @@ impl SnakeRound {
                 && let Some(dir) = bot::choose(world, slot as u8)
             {
                 world.steer(slot as u8, dir);
+                if bot::fires(world, slot as u8, dir) {
+                    world.fire(slot as u8);
+                }
             }
         }
         let outcome = world.step();
@@ -491,6 +523,37 @@ mod tests {
         let mut rules = round.settings.game.clone();
         change(&mut rules);
         rules
+    }
+
+    #[test]
+    fn a_player_fires_the_gun_their_snake_holds() {
+        use crate::guns::{GunKind, Held};
+
+        let mut round = Room::new(
+            RoomSettings::new(quick_guns_rules(), RoomKind::Private).unwrap(),
+            7,
+        );
+        round.join(who(1)).unwrap();
+        round.join(who(2)).unwrap();
+        round.toggle_ready(1);
+        round.toggle_ready(2);
+        run_until(&mut round, running);
+        place(
+            &mut round,
+            &[
+                (&[(5, 5), (4, 5)], Direction::Right),
+                (&[(10, 3), (10, 4), (10, 5), (10, 6)], Direction::Up),
+            ],
+        );
+        round.round_mut().unwrap().world.snakes[0].gun = Some(Held {
+            kind: GunKind::Laser,
+            until: Duration::from_secs(600),
+        });
+        round.play(1, SnakeInput::Fire, None);
+        round.advance(tick(&round));
+        let view = round.view().game;
+        assert_eq!(view.racer(2).map(|r| r.length), Some(3), "cut by the laser");
+        assert_eq!(view.board.unwrap().beams.len(), 1);
     }
 
     #[test]
@@ -848,8 +911,8 @@ mod tests {
                 break;
             }
             if running(&round) {
-                round.play(1, script[i % 4], None);
-                round.play(2, script[i % 4], None);
+                round.play(1, SnakeInput::Turn(script[i % 4]), None);
+                round.play(2, SnakeInput::Turn(script[i % 4]), None);
             }
             let dt = tick(&round);
             events.extend(round.advance(dt));
@@ -935,7 +998,7 @@ mod tests {
             Direction::Up | Direction::Down => Direction::Left,
             Direction::Left | Direction::Right => Direction::Up,
         };
-        round.play(1, turn, None);
+        round.play(1, SnakeInput::Turn(turn), None);
         run_until(&mut round, |r| snakes(r).steps == 1);
         let head = round.view().game.board.unwrap().snakes[0].body[0];
         let expected = crate::geom::wrap_next(start, turn, 30, 18);
@@ -959,7 +1022,7 @@ mod tests {
             for i in 0..200u64 {
                 round.play(
                     i % 4 + 1,
-                    [Direction::Up, Direction::Left][(i / 7 % 2) as usize],
+                    SnakeInput::Turn([Direction::Up, Direction::Left][(i / 7 % 2) as usize]),
                     None,
                 );
                 round.advance(Duration::from_millis(50));

@@ -1,5 +1,5 @@
-//! The board and everything on it: walls, food, and any number of snakes that
-//! all move one cell at the same moment.
+//! The board and everything on it: walls, food, guns, and any number of
+//! snakes that all move one cell at the same moment.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,6 +11,7 @@ use rand::{RngExt, SeedableRng};
 use crate::board;
 use crate::config::Rules;
 use crate::geom::{Direction, Point, wrap_next};
+use crate::guns::{BEAM_SHOWN, BULLET_SPEED, Beam, Bullet, Gun, GunKind, Held, Hit, next_cell};
 use crate::snake::{DeathCause, Snake};
 use crate::spawn;
 use crate::view::{MatchView, SnakeView};
@@ -55,6 +56,8 @@ pub struct Food {
 pub struct StepOutcome {
     pub deaths: Vec<(u8, DeathCause)>,
     pub eaten: Vec<(u8, FoodKind)>,
+    /// Shots that hit, in the order their snakes come.
+    pub hits: Vec<Hit>,
 }
 
 /// One living snake's move during a step.
@@ -73,10 +76,15 @@ pub struct World {
     walls: Arc<[bool]>,
     pub snakes: Vec<Snake>,
     pub foods: Vec<Food>,
+    pub guns: Vec<Gun>,
+    pub bullets: Vec<Bullet>,
+    pub beams: Vec<Beam>,
     /// Game time. It only moves through [`Self::advance_clock`], so a world
     /// driven by fixed ticks replays exactly from its seed and inputs.
     pub clock: Duration,
     next_spawn: [Option<Duration>; FoodKind::ALL.len()],
+    /// When the next gun appears; never in single player.
+    next_gun: Option<Duration>,
     free_cells: usize,
     /// Whether dead snakes turn into food. Otherwise they stay where they
     /// died, as the single-player game-over screen shows.
@@ -99,7 +107,8 @@ impl World {
     }
 
     /// A board with `players` snakes spread apart, for multiplayer. Snakes
-    /// that die turn into food, and food comes faster with more players.
+    /// that die turn into food, food comes faster with more players, and
+    /// guns appear if the rules have them.
     pub fn with_players(rules: Rules, seed: u64, players: usize) -> Result<Self> {
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
         let walls = board::generate_walls(&rules, &mut rng);
@@ -111,6 +120,10 @@ impl World {
         let mut world = Self::new(rules, walls, snakes, rng);
         world.corpses_to_food = true;
         world.scale_food = true;
+        world.next_gun = world
+            .rules
+            .guns
+            .then(|| Duration::from_secs(world.rules.gun_interval_s));
         Ok(world)
     }
 
@@ -133,8 +146,12 @@ impl World {
             rules,
             snakes,
             foods: Vec::new(),
+            guns: Vec::new(),
+            bullets: Vec::new(),
+            beams: Vec::new(),
             clock: Duration::ZERO,
             next_spawn,
+            next_gun: None,
             free_cells,
             corpses_to_food: false,
             scale_food: false,
@@ -165,13 +182,42 @@ impl World {
             .is_some_and(|s| s.enqueue(dir, w, h))
     }
 
-    /// Moves game time forward: food that has run out disappears, and new
-    /// food appears on schedule.
+    /// Asks snake `id` to fire its gun on the next step. Returns whether it
+    /// will: it must be alive and holding one.
+    pub fn fire(&mut self, id: u8) -> bool {
+        let Some(snake) = self
+            .snakes
+            .iter_mut()
+            .find(|s| s.id == id && s.alive() && s.gun.is_some())
+        else {
+            return false;
+        };
+        snake.firing = true;
+        true
+    }
+
+    /// Moves game time forward: food and guns that have run out disappear,
+    /// and new ones appear on schedule.
     pub fn advance_clock(&mut self, dt: Duration) {
         self.clock += dt;
         let clock = self.clock;
         self.foods
             .retain(|f| f.expires_at.is_none_or(|e| e > clock));
+        self.guns.retain(|g| g.expires_at > clock);
+        self.beams.retain(|b| b.until > clock);
+        for snake in &mut self.snakes {
+            if snake.gun.is_some_and(|g| g.until <= clock) {
+                snake.gun = None;
+                snake.firing = false;
+            }
+        }
+        while let Some(t) = self.next_gun {
+            if clock < t {
+                break;
+            }
+            self.spawn_gun();
+            self.next_gun = Some(t + Duration::from_secs(self.rules.gun_interval_s));
+        }
 
         let alive = self.snakes.iter().filter(|s| s.alive()).count();
         for (i, kind) in FoodKind::ALL.into_iter().enumerate() {
@@ -221,9 +267,9 @@ impl World {
     /// - eats poison.
     ///
     /// A tail that moves away this step frees its cell; a growing one doesn't.
-    /// Survivors and poisoned snakes move; the rest die where they are. Last,
-    /// surviving heads eat what they landed on. The order of `snakes` never
-    /// changes the outcome.
+    /// Survivors and poisoned snakes move; the rest die where they are. Then
+    /// surviving heads eat what they landed on, and last come the guns: see
+    /// [`Self::shoot`]. The order of `snakes` never changes the outcome.
     pub fn step(&mut self) -> StepOutcome {
         let (w, h) = (self.width, self.height);
         let wu = w as usize;
@@ -330,15 +376,156 @@ impl World {
                 }
             }
         }
+        self.shoot(&mut out);
         out
+    }
+
+    /// The guns' part of a step, once every snake has moved:
+    /// - bullets in flight go on, then the shots asked for fire, from the
+    ///   heads where they now are;
+    /// - every hit lands at once: a snake hit in the head dies, and one hit
+    ///   in the body loses everything behind the hit nearest its head, the
+    ///   piece turning into food;
+    /// - last, the heads left take any gun they're on, in place of one they
+    ///   hold.
+    fn shoot(&mut self, out: &mut StepOutcome) {
+        // (shooter, target snake's place in `snakes`, cell of its body hit)
+        let mut hits: Vec<(u8, usize, usize)> = Vec::new();
+        let bullets = std::mem::take(&mut self.bullets);
+        for bullet in bullets {
+            self.fly(bullet, true, &mut hits);
+        }
+        for i in 0..self.snakes.len() {
+            let snake = &mut self.snakes[i];
+            let firing = std::mem::take(&mut snake.firing);
+            if !firing || !snake.alive() {
+                continue;
+            }
+            let Some(gun) = snake.gun.take() else {
+                continue;
+            };
+            let (owner, pos, dir) = (snake.id, snake.head(), snake.dir);
+            match gun.kind {
+                GunKind::Laser => {
+                    let cells = self.line_of_fire(pos, dir, usize::MAX);
+                    for &p in &cells {
+                        hits.extend(self.struck(p, owner).map(|(t, at)| (owner, t, at)));
+                    }
+                    self.beams.push(Beam {
+                        dir,
+                        cells,
+                        until: self.clock + BEAM_SHOWN,
+                    });
+                }
+                GunKind::Pistol => self.fly(Bullet { owner, pos, dir }, false, &mut hits),
+            }
+        }
+
+        let mut order: Vec<usize> = hits.iter().map(|h| h.1).collect();
+        order.sort_unstable();
+        order.dedup();
+        for target in order {
+            let &(shooter, _, keep) = hits
+                .iter()
+                .filter(|h| h.1 == target)
+                .min_by_key(|h| h.2)
+                .expect("a hit on it");
+            let snake = &mut self.snakes[target];
+            out.hits.push(Hit {
+                shooter,
+                target: snake.id,
+                left: keep,
+            });
+            if keep == 0 {
+                snake.death = Some(DeathCause::Shot);
+                snake.gun = None;
+                out.deaths.push((snake.id, DeathCause::Shot));
+                if self.corpses_to_food {
+                    self.turn_into_food(target);
+                }
+            } else {
+                let piece = snake.cut(keep);
+                if self.corpses_to_food {
+                    self.cells_to_food(piece);
+                }
+            }
+        }
+
+        let hold = Duration::from_secs(self.rules.gun_hold_s);
+        for snake in self.snakes.iter_mut().filter(|s| s.alive()) {
+            if let Some(i) = self.guns.iter().position(|g| g.pos == snake.head()) {
+                let gun = self.guns.remove(i);
+                snake.gun = Some(Held {
+                    kind: gun.kind,
+                    until: self.clock + hold,
+                });
+            }
+        }
+    }
+
+    /// Moves a bullet up to [`BULLET_SPEED`] cells, checking first the cell
+    /// it's on if `here`, since a head may have moved into it. It stops at a
+    /// wall, at the board's edge, or at the first snake it hits; otherwise
+    /// it flies on next step.
+    fn fly(&mut self, mut bullet: Bullet, here: bool, hits: &mut Vec<(u8, usize, usize)>) {
+        let path = self.line_of_fire(bullet.pos, bullet.dir, BULLET_SPEED);
+        let checked = here
+            .then_some(bullet.pos)
+            .into_iter()
+            .chain(path.iter().copied());
+        for p in checked {
+            if let Some((target, at)) = self.struck(p, bullet.owner).next() {
+                hits.push((bullet.owner, target, at));
+                return;
+            }
+        }
+        if path.len() < BULLET_SPEED {
+            // It reached a wall or the edge.
+            return;
+        }
+        bullet.pos = *path.last().expect("a full path");
+        self.bullets.push(bullet);
+    }
+
+    /// Up to `most` cells from `from` straight on in `dir`, up to the first
+    /// wall or the board's edge, whichever comes first.
+    pub(crate) fn line_of_fire(&self, from: Point, dir: Direction, most: usize) -> Vec<Point> {
+        let (w, h) = (self.width, self.height);
+        let mut cells = Vec::new();
+        let mut p = from;
+        while cells.len() < most
+            && let Some(next) = next_cell(p, dir, w, h)
+            && !self.walls[self.idx(next)]
+        {
+            cells.push(next);
+            p = next;
+        }
+        cells
+    }
+
+    /// The living snakes, other than `owner`, with a cell at `p`: each one's
+    /// place in `snakes`, and the cell of its body nearest its head there.
+    fn struck(&self, p: Point, owner: u8) -> impl Iterator<Item = (usize, usize)> + '_ {
+        self.snakes.iter().enumerate().filter_map(move |(i, s)| {
+            if !s.alive() || s.id == owner {
+                return None;
+            }
+            s.body.iter().position(|&c| c == p).map(|at| (i, at))
+        })
     }
 
     /// Replaces a dead snake's body with food, except where something else is.
     fn turn_into_food(&mut self, snake: usize) {
         let body = std::mem::take(&mut self.snakes[snake].body);
-        for p in body {
+        self.cells_to_food(body);
+    }
+
+    /// Puts food on `cells`, except where something else is.
+    fn cells_to_food(&mut self, cells: impl IntoIterator<Item = Point>) {
+        for p in cells {
             let taken = self.walls[self.idx(p)]
                 || self.foods.iter().any(|f| f.pos == p)
+                || self.guns.iter().any(|g| g.pos == p)
                 || self.snakes.iter().any(|s| s.alive() && s.body.contains(&p));
             if !taken {
                 self.place_food(p, FoodKind::Normal);
@@ -346,13 +533,19 @@ impl World {
         }
     }
 
-    fn spawn_food(&mut self, kind: FoodKind) {
+    /// A cell picked at random with no wall, snake, food or gun on it.
+    fn free_cell(&mut self) -> Option<Point> {
         let mut taken: Vec<bool> = self.walls.to_vec();
         for p in self.snakes.iter().flat_map(|s| &s.body) {
             taken[self.idx(*p)] = true;
         }
-        for f in &self.foods {
-            taken[self.idx(f.pos)] = true;
+        for p in self
+            .foods
+            .iter()
+            .map(|f| f.pos)
+            .chain(self.guns.iter().map(|g| g.pos))
+        {
+            taken[self.idx(p)] = true;
         }
         let w = self.width as usize;
         let cells: Vec<Point> = (0..taken.len())
@@ -363,10 +556,27 @@ impl World {
             })
             .collect();
         if cells.is_empty() {
-            return;
+            return None;
         }
-        let pos = cells[self.rng.random_range(0..cells.len())];
-        self.place_food(pos, kind);
+        Some(cells[self.rng.random_range(0..cells.len())])
+    }
+
+    fn spawn_food(&mut self, kind: FoodKind) {
+        if let Some(pos) = self.free_cell() {
+            self.place_food(pos, kind);
+        }
+    }
+
+    fn spawn_gun(&mut self) {
+        let Some(pos) = self.free_cell() else {
+            return;
+        };
+        let kind = GunKind::ALL[self.rng.random_range(0..GunKind::ALL.len())];
+        self.guns.push(Gun {
+            pos,
+            kind,
+            expires_at: self.clock + Duration::from_secs(self.rules.gun_ttl_s),
+        });
     }
 
     fn place_food(&mut self, pos: Point, kind: FoodKind) {
@@ -391,9 +601,20 @@ impl World {
                     id: s.id,
                     body: s.body.iter().copied().collect(),
                     alive: s.alive(),
+                    gun: s
+                        .gun
+                        .filter(|_| s.alive())
+                        .map(|g| (g.kind, g.until.saturating_sub(self.clock))),
                 })
                 .collect(),
             foods: self.foods.iter().map(|f| (f.pos, f.kind)).collect(),
+            guns: self.guns.iter().map(|g| (g.pos, g.kind)).collect(),
+            bullets: self.bullets.iter().map(|b| (b.pos, b.dir)).collect(),
+            beams: self
+                .beams
+                .iter()
+                .map(|b| (b.dir, b.cells.clone()))
+                .collect(),
             clock: self.clock,
         }
     }
@@ -408,6 +629,7 @@ mod tests {
     use super::*;
     use crate::config::{GrowthMode, InnerWalls, WallMode};
     use crate::geom::Direction::{self, Down, Left, Right, Up};
+    use crate::guns::{Bullet, Gun};
 
     fn rules(wall_mode: WallMode) -> Rules {
         Rules {
@@ -681,6 +903,265 @@ mod tests {
         assert_ne!(run_script(42, &script), run_script(43, &script));
     }
 
+    /// A walled 30×20 board with guns on, where dead snakes turn into food,
+    /// holding just the given snakes.
+    fn armed(wall_mode: WallMode, snakes: &[(&[(u16, u16)], Direction)]) -> World {
+        let rules = Rules {
+            guns: true,
+            ..rules(wall_mode)
+        };
+        let mut world = world(rules, snakes);
+        world.corpses_to_food = true;
+        world
+    }
+
+    /// Snake `id` takes a gun of `kind` and fires it on the next step.
+    fn fire(world: &mut World, id: u8, kind: GunKind) {
+        world.snakes[id as usize].gun = Some(Held {
+            kind,
+            until: world.clock + Duration::from_secs(5),
+        });
+        assert!(world.fire(id));
+    }
+
+    fn wall(world: &mut World, x: u16, y: u16) {
+        let mut walls = world.walls.to_vec();
+        walls[y as usize * world.width as usize + x as usize] = true;
+        world.walls = walls.into();
+    }
+
+    fn food_cells(world: &World) -> Vec<(u16, u16)> {
+        let mut cells: Vec<_> = world.foods.iter().map(|f| (f.pos.x, f.pos.y)).collect();
+        cells.sort();
+        cells
+    }
+
+    fn hit(shooter: u8, target: u8, left: usize) -> Hit {
+        Hit {
+            shooter,
+            target,
+            left,
+        }
+    }
+
+    use DeathCause::Shot;
+    use GunKind::{Laser, Pistol};
+
+    #[test]
+    fn a_laser_cuts_every_snake_in_its_line_up_to_a_wall() {
+        let mut w = armed(
+            WallMode::Full,
+            &[
+                (&[(5, 5), (4, 5)], Right),
+                // Crosses the line with its third cell, once it has moved.
+                (&[(10, 3), (10, 4), (10, 5), (10, 6)], Up),
+                // Puts its head in the line.
+                (&[(15, 6), (15, 7)], Up),
+                // Behind the wall.
+                (&[(22, 6), (22, 5), (22, 4)], Down),
+            ],
+        );
+        wall(&mut w, 20, 5);
+        fire(&mut w, 0, Laser);
+        let out = w.step();
+        assert_eq!(out.deaths, [(2, Shot)]);
+        assert_eq!(out.hits, [hit(0, 1, 3), hit(0, 2, 0)]);
+        assert_eq!(body(&w, 1), [(10, 2), (10, 3), (10, 4)]);
+        assert_eq!(
+            body(&w, 3),
+            [(22, 7), (22, 6), (22, 5)],
+            "the wall stops it"
+        );
+        assert_eq!(
+            food_cells(&w),
+            [(10, 5), (15, 5), (15, 6)],
+            "the cut piece and the dead snake"
+        );
+        assert_eq!(w.snakes[0].gun, None, "it fires once");
+        let beam = &w.beams[0].cells;
+        assert_eq!(
+            (beam[0], beam[beam.len() - 1]),
+            (Point { x: 7, y: 5 }, Point { x: 19, y: 5 })
+        );
+        w.advance_clock(BEAM_SHOWN);
+        assert!(w.beams.is_empty(), "it shows only a moment");
+    }
+
+    #[test]
+    fn a_laser_stops_at_the_edge_where_snakes_would_wrap() {
+        let mut w = armed(
+            WallMode::Open,
+            &[
+                (&[(25, 5), (24, 5)], Right),
+                (&[(2, 4), (2, 5), (2, 6)], Up),
+            ],
+        );
+        fire(&mut w, 0, Laser);
+        assert_eq!(w.step().hits, []);
+        assert_eq!(w.beams[0].cells.last(), Some(&Point { x: 29, y: 5 }));
+    }
+
+    #[test]
+    fn a_snake_hit_twice_keeps_what_comes_before_the_nearest_hit() {
+        let mut w = armed(
+            WallMode::Full,
+            &[
+                (&[(5, 5), (4, 5)], Right),
+                // Crosses the line twice once it has moved: cells 2 and 6.
+                (
+                    &[
+                        (10, 4),
+                        (10, 5),
+                        (10, 6),
+                        (11, 6),
+                        (12, 6),
+                        (12, 5),
+                        (12, 4),
+                        (12, 3),
+                    ],
+                    Up,
+                ),
+            ],
+        );
+        fire(&mut w, 0, Laser);
+        assert_eq!(w.step().hits, [hit(0, 1, 2)]);
+        assert_eq!(body(&w, 1), [(10, 3), (10, 4)]);
+    }
+
+    #[test]
+    fn a_snake_never_shoots_itself() {
+        let coiled: &[(u16, u16)] = &[(5, 5), (5, 6), (6, 6), (7, 6), (8, 6), (8, 5), (8, 4)];
+        let mut w = armed(
+            WallMode::Full,
+            &[(coiled, Right), (&[(12, 3), (12, 4), (12, 5), (12, 6)], Up)],
+        );
+        fire(&mut w, 0, Laser);
+        assert_eq!(w.step().hits, [hit(0, 1, 3)], "through its own body");
+        assert_eq!(w.snakes[0].len(), 7);
+    }
+
+    #[test]
+    fn snakes_that_shoot_each_other_both_die() {
+        // Heads two cells apart once they've moved: the bullet gets there in
+        // the same step as the laser.
+        let mut w = armed(
+            WallMode::Full,
+            &[(&[(5, 5), (4, 5)], Right), (&[(9, 5), (10, 5)], Left)],
+        );
+        fire(&mut w, 0, Laser);
+        fire(&mut w, 1, Pistol);
+        assert_eq!(w.step().deaths, [(0, Shot), (1, Shot)]);
+    }
+
+    #[test]
+    fn a_bullet_flies_three_cells_a_step_and_stops_at_the_first_snake() {
+        let column = |x: u16| -> Vec<(u16, u16)> { (1..=7).rev().map(|y| (x, y)).collect() };
+        let (first, second) = (column(13), column(16));
+        let mut w = armed(
+            WallMode::Full,
+            &[(&[(5, 5), (4, 5)], Right), (&first, Down), (&second, Down)],
+        );
+        fire(&mut w, 0, Pistol);
+        let bullet = |x| Bullet {
+            owner: 0,
+            pos: Point { x, y: 5 },
+            dir: Right,
+        };
+        assert_eq!(w.step().hits, []);
+        assert_eq!(w.bullets, [bullet(9)]);
+        assert_eq!(w.step().hits, []);
+        assert_eq!(w.bullets, [bullet(12)], "faster than the snake behind it");
+        assert_eq!(w.step().hits, [hit(0, 1, 5)]);
+        assert!(w.bullets.is_empty(), "it stops at the first");
+        assert_eq!(w.snakes[2].len(), 7);
+    }
+
+    #[test]
+    fn a_bullet_stops_at_walls_and_edges() {
+        for (wall_mode, from) in [(WallMode::Full, 23), (WallMode::Open, 24)] {
+            let mut w = armed(wall_mode, &[(&[(from, 5), (from - 1, 5)], Right)]);
+            fire(&mut w, 0, Pistol);
+            w.step();
+            assert_eq!(w.bullets.len(), 1, "{wall_mode:?}");
+            w.step();
+            assert!(w.bullets.is_empty(), "{wall_mode:?}: it never wraps");
+        }
+    }
+
+    #[test]
+    fn a_head_coming_at_a_bullet_is_hit() {
+        let mut w = armed(
+            WallMode::Full,
+            &[(&[(5, 15), (4, 15)], Right), (&[(9, 5), (8, 5)], Right)],
+        );
+        w.bullets.push(Bullet {
+            owner: 0,
+            pos: Point { x: 10, y: 5 },
+            dir: Left,
+        });
+        assert_eq!(w.step().deaths, [(1, Shot)], "it moved onto the bullet");
+    }
+
+    #[test]
+    fn a_gun_taken_replaces_the_one_held() {
+        let mut w = armed(WallMode::Full, &[(&[(5, 5), (4, 5)], Right)]);
+        assert!(!w.fire(0), "nothing to fire");
+        w.snakes[0].gun = Some(Held {
+            kind: Laser,
+            until: Duration::from_secs(1),
+        });
+        w.guns.push(Gun {
+            pos: Point { x: 6, y: 5 },
+            kind: Pistol,
+            expires_at: Duration::from_secs(60),
+        });
+        w.step();
+        assert_eq!(
+            w.snakes[0].gun,
+            Some(Held {
+                kind: Pistol,
+                until: w.clock + Duration::from_secs(w.rules.gun_hold_s),
+            })
+        );
+        assert!(w.guns.is_empty());
+    }
+
+    #[test]
+    fn guns_come_and_go_on_their_clocks() {
+        let rules = Rules {
+            guns: true,
+            gun_interval_s: 10,
+            gun_ttl_s: 8,
+            gun_hold_s: 5,
+            ..Rules::default()
+        };
+        let mut w = World::with_players(rules.clone(), 3, 2).unwrap();
+        let second = Duration::from_secs(1);
+        let mut on_board = Vec::new();
+        for _ in 0..30 {
+            w.advance_clock(second);
+            on_board.push(w.guns.len());
+        }
+        // One appears at 10 s and 20 s and 30 s, each gone 8 s later.
+        let expected: Vec<usize> = (1..=30)
+            .map(|t| usize::from(t >= 10 && t % 10 < 8))
+            .collect();
+        assert_eq!(on_board, expected);
+
+        w.snakes[0].gun = Some(Held {
+            kind: Laser,
+            until: w.clock + Duration::from_secs(5),
+        });
+        w.advance_clock(Duration::from_secs(4));
+        assert!(w.snakes[0].gun.is_some());
+        w.advance_clock(second);
+        assert_eq!(w.snakes[0].gun, None, "too late to fire it");
+
+        let mut solo = World::solo(rules, 3).unwrap();
+        solo.advance_clock(Duration::from_secs(60));
+        assert!(solo.guns.is_empty(), "single player has none");
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(64))]
 
@@ -689,7 +1170,8 @@ mod tests {
             seed in any::<u64>(),
             players in 2usize..=4,
             wrap in any::<bool>(),
-            keys in prop::collection::vec((0usize..4, 0usize..4), 0..150),
+            // A key's second half is a turn, or else a gun to fire at once.
+            keys in prop::collection::vec((0usize..4, 0usize..6), 0..150),
         ) {
             let rules = Rules {
                 width: 20,
@@ -699,6 +1181,8 @@ mod tests {
                 food_interval_s: 1,
                 super_interval_s: 2,
                 growth_mode: if seed % 2 == 0 { GrowthMode::Instant } else { GrowthMode::AtTail },
+                guns: true,
+                gun_interval_s: 3,
                 ..Rules::default()
             };
             let (w, h) = (rules.width, rules.height);
@@ -706,9 +1190,19 @@ mod tests {
             prop_assume!(world.is_ok());
             let mut world = world.unwrap();
             let dirs = [Up, Down, Left, Right];
-            for (who, dir) in keys {
+            for (who, key) in keys {
+                let until = world.clock + Duration::from_secs(5);
                 if let Some(s) = world.snakes.get_mut(who % players) && s.alive() {
-                    s.enqueue(dirs[dir], w, h);
+                    match key {
+                        0..4 => {
+                            s.enqueue(dirs[key], w, h);
+                        }
+                        _ => {
+                            let kind = GunKind::ALL[key - 4];
+                            s.gun = Some(Held { kind, until });
+                            s.firing = true;
+                        }
+                    }
                 }
                 world.advance_clock(Duration::from_millis(150));
                 world.step();
@@ -717,6 +1211,7 @@ mod tests {
                 // tail instant growth leaves, and no two snakes share a cell.
                 let mut owner: HashMap<Point, u8> = HashMap::new();
                 for s in world.snakes.iter().filter(|s| s.alive()) {
+                    prop_assert!(!s.body.is_empty(), "snake {} has no head", s.id);
                     let cells: Vec<Point> = s.body.iter().copied().collect();
                     let first_repeat = (1..cells.len())
                         .find(|&i| cells[i] == cells[i - 1])

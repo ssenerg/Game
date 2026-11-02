@@ -8,7 +8,7 @@ use std::time::Duration;
 use common::accounts::*;
 use common::*;
 use snake_core::round::{Entrant, Room, RoomKind, RoomSettings, quick_rules};
-use snaketui_server::rating::{Rating, SNAKE_QUICK};
+use snaketui_server::rating::{Rating, SNAKE_GUNS, SNAKE_QUICK};
 use snaketui_server::store::{RatedResult, Store};
 
 #[tokio::test]
@@ -253,14 +253,24 @@ async fn the_leaderboard_lists_players_after_five_rated_games() {
     cat.wait_for("Signed in as cat").await;
 }
 
-/// The rating in the home menu's "Signed in as … · rating N".
+/// The rating in the home menu's "Signed in as … · classic N", whichever
+/// of Snake's it shows.
 fn rating_on_home(text: &str) -> Option<u32> {
-    let at = text.find("· rating ")? + "· rating ".len();
-    let digits: String = text[at..]
+    shown_on_home(text).map(|(_, rating)| rating)
+}
+
+/// The rating the home menu shows, and what it's called.
+fn shown_on_home(text: &str) -> Option<(String, u32)> {
+    let line = text.lines().find(|l| l.contains("Signed in as"))?;
+    let (_, shown) = line.rsplit_once(" · ")?;
+    let mut words = shown.split_whitespace();
+    let label = words.next()?.to_string();
+    let digits: String = words
+        .next()?
         .chars()
         .take_while(char::is_ascii_digit)
         .collect();
-    digits.parse().ok()
+    Some((label, digits.parse().ok()?))
 }
 
 #[tokio::test]
@@ -342,7 +352,7 @@ async fn quick_play_offers_an_unrated_match_against_bots() {
     let server = TestServer::start();
     let (mut ann, _) = signed_up(server.addr, "ann").await;
     ann.send(ENTER).await;
-    ann.wait_for("Finding a match").await;
+    snake_queue(&mut ann).await;
     assert!(!ann.text().contains("bots"), "{}", ann.text());
     ann.wait_until("bots offered", Duration::from_secs(30), |p| {
         p.text().contains("b play bots")
@@ -367,9 +377,10 @@ async fn beating_guests_doesnt_move_a_rating() {
     let server = TestServer::with(|c| c.room_seed = Some(seed));
     let (mut ann, _) = signed_up(server.addr, "ann").await;
     ann.send(ENTER).await;
-    ann.wait_for("Finding a match").await;
+    snake_queue(&mut ann).await;
     let mut guest = connect_as(server.addr, Login::Guest).await;
     pick(&guest, 0, QUICK_PLAY).await;
+    snake_queue(&mut guest).await;
     for p in [&mut ann, &mut guest] {
         p.wait_until("the results", Duration::from_secs(30), |p| {
             p.text().contains("RESULTS")
@@ -394,8 +405,9 @@ async fn a_rated_match_moves_the_winners_rating_up_and_the_losers_down() {
     let (mut ann, key) = signed_up(server.addr, "ann").await;
     let (mut ben, _) = signed_up(server.addr, "ben").await;
     ann.send(ENTER).await;
-    ann.wait_for("Finding a match").await;
+    snake_queue(&mut ann).await;
     ben.send(ENTER).await;
+    snake_queue(&mut ben).await;
     for p in [&mut ann, &mut ben] {
         p.wait_until("the results", Duration::from_secs(30), |p| {
             p.text().contains("RESULTS")
@@ -425,4 +437,55 @@ async fn a_rated_match_moves_the_winners_rating_up_and_the_losers_down() {
     drop(ann);
     let again = connect_as(server.addr, Login::Key(&key)).await;
     assert_eq!(rating_on_home(&again.text()), rating, "{}", again.text());
+}
+
+#[tokio::test]
+async fn quick_play_with_guns_is_rated_apart_from_classic() {
+    // Nobody presses a key, so the round is over long before the first gun.
+    let seed = first_player_wins_seed();
+    let server = TestServer::with(|c| c.room_seed = Some(seed));
+    let (mut ann, _) = signed_up(server.addr, "ann").await;
+    let (mut ben, _) = signed_up(server.addr, "ben").await;
+    for p in [&mut ann, &mut ben] {
+        p.send(ENTER).await;
+        p.wait_for("QUICK PLAY").await;
+        p.send(b"\x1b[B").await;
+        p.send(ENTER).await;
+        p.wait_for("Finding a match").await;
+    }
+    assert!(ann.text().contains("Guns"), "{}", ann.text());
+    for p in [&mut ann, &mut ben] {
+        p.wait_until("the rating changes", Duration::from_secs(30), |p| {
+            let text = p.text();
+            line_of(&text, ". ann ").contains('+') && line_of(&text, ". ben ").contains('−')
+        })
+        .await;
+        p.send(ESC).await;
+    }
+    ann.wait_until("a higher guns rating", Duration::from_secs(3), |p| {
+        shown_on_home(&p.text()).is_some_and(|(label, r)| label == "guns" && r > 1000)
+    })
+    .await;
+    ben.wait_until("a lower guns rating", Duration::from_secs(3), |p| {
+        shown_on_home(&p.text()).is_some_and(|(label, r)| label == "guns" && r < 1000)
+    })
+    .await;
+
+    let store = Store::open(&format!(
+        "sqlite://{}",
+        server.dir.join("db.sqlite").display()
+    ))
+    .await
+    .unwrap();
+    let (account, _) = store.find_account("ann").await.unwrap().unwrap();
+    let rated: Vec<_> = store
+        .load_account(account.id)
+        .await
+        .unwrap()
+        .ratings
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
+    assert_eq!(rated, [SNAKE_GUNS], "classic is untouched");
+    store.close().await;
 }

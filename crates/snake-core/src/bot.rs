@@ -1,11 +1,18 @@
 //! A computer player. Each step it heads for the nearest food it can reach,
 //! never into a wall, a body or poison while it has another way, and away
-//! from moves that would box it in or meet another head.
+//! from moves that would box it in or meet another head. Where there are
+//! guns, it goes for them as for food while it has none, and fires when
+//! another snake is in its line of fire.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use crate::geom::{Direction, Point, wrap_next};
+use crate::guns::GunKind;
 use crate::world::{FoodKind, World};
+
+/// Further than this, a pistol's bullet would likely miss a moving snake,
+/// so bots hold their fire.
+const PISTOL_RANGE: usize = 12;
 
 const DIRECTIONS: [Direction; 4] = [
     Direction::Up,
@@ -55,6 +62,11 @@ pub fn choose(world: &World, id: u8) -> Option<Direction> {
     for f in world.foods.iter().filter(|f| f.kind != FoodKind::Poison) {
         food[at(f.pos)] = true;
     }
+    if me.gun.is_none() {
+        for gun in &world.guns {
+            food[at(gun.pos)] = true;
+        }
+    }
 
     DIRECTIONS
         .into_iter()
@@ -77,6 +89,33 @@ pub fn choose(world: &World, id: u8) -> Option<Direction> {
                 dir == me.dir,
             )
         })
+}
+
+/// Whether snake `id`, about to go `dir`, should fire the gun it holds: it
+/// fires once another snake is in its line of fire from where its head
+/// will be, anywhere along it for a laser and close for a pistol.
+pub fn fires(world: &World, id: u8, dir: Direction) -> bool {
+    let Some(me) = world.snakes.iter().find(|s| s.id == id && s.alive()) else {
+        return false;
+    };
+    let Some(gun) = me.gun else {
+        return false;
+    };
+    let reach = match gun.kind {
+        GunKind::Laser => usize::MAX,
+        GunKind::Pistol => PISTOL_RANGE,
+    };
+    let others: HashSet<Point> = world
+        .snakes
+        .iter()
+        .filter(|s| s.alive() && s.id != id)
+        .flat_map(|s| s.body.iter().copied())
+        .collect();
+    let head = wrap_next(me.head(), dir, world.width, world.height);
+    world
+        .line_of_fire(head, dir, reach)
+        .iter()
+        .any(|p| others.contains(p))
 }
 
 /// From `start`: how many open cells can be reached, and how many steps
@@ -223,6 +262,52 @@ mod tests {
         let mut world = board(Rules::default());
         world.snakes[0].death = Some(crate::snake::DeathCause::Wall);
         assert_eq!(choose(&world, 0), None);
+    }
+
+    #[test]
+    fn it_fires_when_a_snake_is_in_its_line() {
+        use crate::guns::Held;
+
+        let mut world = board(Rules::default());
+        let hold = |kind| {
+            Some(Held {
+                kind,
+                until: std::time::Duration::from_secs(5),
+            })
+        };
+        // Another snake across row 5, eight cells ahead.
+        let across = (4..=6).map(|y| p(10, y)).collect();
+        world.snakes.push(Snake::new(1, across, Direction::Up));
+        assert!(!fires(&world, 0, Direction::Right), "no gun");
+        world.snakes[0].gun = hold(GunKind::Laser);
+        assert!(fires(&world, 0, Direction::Right));
+        assert!(!fires(&world, 0, Direction::Up), "nobody that way");
+        world.snakes[0].gun = hold(GunKind::Pistol);
+        assert!(fires(&world, 0, Direction::Right), "close enough");
+    }
+
+    #[test]
+    fn bots_take_guns_and_fire_them() {
+        let mut hits = 0;
+        for seed in 0..6 {
+            let mut world = World::with_players(crate::round::quick_guns_rules(), seed, 4).unwrap();
+            for _ in 0..2000 {
+                if world.alive() < 2 {
+                    break;
+                }
+                world.advance_clock(std::time::Duration::from_millis(150));
+                for id in 0..4 {
+                    if let Some(dir) = choose(&world, id) {
+                        world.steer(id, dir);
+                        if fires(&world, id, dir) {
+                            world.fire(id);
+                        }
+                    }
+                }
+                hits += world.step().hits.len();
+            }
+        }
+        assert!(hits > 0, "no bot ever hit anyone");
     }
 
     #[test]

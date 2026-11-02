@@ -119,10 +119,12 @@ async fn play(server: SocketAddr, stats: &Stats, seed: &mut u64) -> anyhow::Resu
     ended
 }
 
-/// Into quick play from the home menu, then mostly steering; now and then
-/// Enter, which queues again after a match. Ends only if sending fails.
+/// Into quick play from the home menu, in its first pool, then mostly
+/// steering; now and then Enter, which queues again after a match. Ends
+/// only if sending fails.
 async fn press_keys(tx: &ChannelWriteHalf<client::Msg>, seed: &mut u64) -> anyhow::Result<()> {
     tx.data_bytes(DOWN.to_vec()).await?;
+    tx.data_bytes(ENTER.to_vec()).await?;
     tx.data_bytes(ENTER.to_vec()).await?;
     let keys = [UP, LEFT, DOWN, RIGHT];
     loop {

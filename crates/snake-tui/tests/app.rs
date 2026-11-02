@@ -12,28 +12,51 @@ use shell_tui::online::{
     Field, FormKind, FormRow, FriendRow, FriendsView, HomeItem, LeaderboardView, MyPlace, Profile,
     ShownRating,
 };
-use shell_tui::{App, Effect, GameFx, Key, Screen};
+use shell_tui::{App, Effect, GameFx, GameUi, Key, Screen};
 use snake_core::config::{Rules, TICK_MS_MAX, TICK_MS_MIN};
 use snake_core::geom::Direction;
 use snake_core::round::{
-    Entrant, PhaseView, QUICK_POOL, QUICK_RATING, Room, RoomKind, RoomSettings, RoomView,
-    max_players_for, quick_rules,
+    Entrant, GUNS_POOL, PhaseView, QUICK_POOL, QUICK_RATING, Room, RoomKind, RoomSettings,
+    RoomView, SnakeInput, max_players_for, quick_rules,
 };
 use snake_tui::{SnakeScreen, SnakeUi};
 
 fn steer(dir: Direction) -> Effect {
-    Effect::Game(GameId::Snake, GameFx::Play(encode(&dir)))
+    Effect::Game(GameId::Snake, GameFx::Play(encode(&SnakeInput::Turn(dir))))
 }
 
 fn set_rules(rules: Rules) -> Effect {
     Effect::Game(GameId::Snake, GameFx::Settings(encode(&rules)))
 }
 
-fn quick_play() -> Effect {
+fn quick_play(pool: &'static str) -> Effect {
     Effect::QuickPlay {
         game: GameId::Snake,
-        pool: QUICK_POOL,
+        pool,
     }
+}
+
+/// Quick play from home: its choice of pools, then Enter on the one at
+/// `selected`. The effects past saving the choice.
+fn queue_at(app: &mut App, selected: usize) -> Vec<Effect> {
+    assert_eq!(choose(app, HomeItem::QuickPlay), []);
+    assert_eq!(app.screen, Screen::Game);
+    let at = match snake(app).screen {
+        SnakeScreen::QuickPlay { selected } => selected,
+        other => panic!("{other:?}"),
+    };
+    for _ in at..selected {
+        app.handle(Key::Down);
+    }
+    let effects = app.handle(Key::Enter);
+    assert!(
+        matches!(
+            effects[0],
+            Effect::Game(GameId::Snake, GameFx::SavePrefs(_))
+        ),
+        "{effects:?}"
+    );
+    effects[1..].to_vec()
 }
 
 /// A Snake quick-play rating as an account shows it.
@@ -109,16 +132,48 @@ fn codes_are_typed_in_capitals_and_must_be_complete() {
 }
 
 #[test]
-fn quick_play_on_a_small_terminal_warns_first() {
+fn quick_play_picks_a_pool_and_opens_at_it_next_time() {
     let mut app = online();
-    app.resize(Size::new(60, 20));
-    assert_eq!(choose(&mut app, HomeItem::QuickPlay), []);
-    assert!(app.online.notice.is_some());
-    assert_eq!(app.handle(Key::Enter), [quick_play()]);
+    assert_eq!(queue_at(&mut app, 1), [quick_play(GUNS_POOL)]);
     assert_eq!(app.screen, Screen::Finding);
     app.tick(Duration::from_secs(2));
     assert_eq!(app.online.waited, Duration::from_secs(2));
     assert_eq!(app.handle(Key::Esc), [Effect::LeaveQueue]);
+
+    choose(&mut app, HomeItem::QuickPlay);
+    assert_eq!(
+        snake(&app).screen,
+        SnakeScreen::QuickPlay { selected: 1 },
+        "where it was left"
+    );
+    assert_eq!(app.handle(Key::Esc), []);
+    assert!(matches!(app.screen, Screen::Home { .. }));
+
+    // The choice is kept with the settings, and read back.
+    let saved = snake(&app).saved();
+    assert!(saved.prefs.ends_with("quick=guns\n"), "{}", saved.prefs);
+    let mut again = SnakeUi::default();
+    again.restore(saved);
+    assert_eq!(again.quick, 1);
+    assert_eq!(again.cfg, snake(&app).cfg);
+}
+
+#[test]
+fn quick_play_queues_on_a_small_terminal_too() {
+    let mut app = online();
+    app.resize(Size::new(60, 20));
+    assert_eq!(queue_at(&mut app, 0), [quick_play(QUICK_POOL)]);
+    assert_eq!(app.screen, Screen::Finding);
+}
+
+#[test]
+fn f_fires_while_the_snake_plays() {
+    let mut app = online();
+    app.screen = Screen::Finding;
+    app.enter_room(1, matched_view());
+    let fire = || Effect::Game(GameId::Snake, GameFx::Play(encode(&SnakeInput::Fire)));
+    assert_eq!(app.handle(Key::Char('f')), [fire()]);
+    assert_eq!(app.handle(Key::Char('F')), [fire()]);
 }
 
 fn matched_view() -> Arc<RoomView> {
@@ -161,7 +216,7 @@ fn the_host_adds_bots_and_takes_them_out() {
 #[test]
 fn quick_play_offers_bots_after_a_while() {
     let mut app = online();
-    assert_eq!(choose(&mut app, HomeItem::QuickPlay), [quick_play()]);
+    assert_eq!(queue_at(&mut app, 0), [quick_play(QUICK_POOL)]);
     assert_eq!(app.handle(Key::Char('b')), [], "people may come yet");
     app.online.waited = BOTS_OFFERED_AFTER;
     let effects = app.handle(Key::Char('b'));

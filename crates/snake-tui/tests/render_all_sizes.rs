@@ -15,11 +15,13 @@ use shell_tui::online::{
 };
 use shell_tui::{App, Screen};
 use snake_core::config::{GameConfig, Rules};
+use snake_core::geom::{Direction, Point};
+use snake_core::guns::GunKind;
 use snake_core::records::Records;
 use snake_core::round::RatingChange;
 use snake_core::round::{
     Entrant, PhaseView, QUICK_RATING, Room, RoomKind, RoomSettings, RoomView, bot_entrant,
-    quick_rules,
+    quick_guns_rules, quick_rules,
 };
 use snake_core::solo::{GameOverReason, SoloGame};
 use snake_tui::{SnakeScreen, SnakeUi, ui};
@@ -184,6 +186,26 @@ fn room_views(rules: &Rules) -> Vec<RoomView> {
         round.advance(step);
     }
     views.push(round.view());
+    // A match with guns: on the board, in flight, lit, and held by everyone.
+    let armed = RoomSettings::new(quick_guns_rules(), RoomKind::Match).unwrap();
+    let bots = (0..3).map(bot_entrant);
+    let mut round = Room::new_match(armed, 4, [entrant(1)].into_iter().chain(bots).collect());
+    while !matches!(round.view().shell.phase, PhaseView::Running { .. }) {
+        round.advance(step);
+    }
+    let mut view = round.view();
+    let board = view.game.board.as_mut().expect("a board");
+    let p = |x, y| Point { x, y };
+    board.guns = vec![(p(3, 3), GunKind::Laser), (p(4, 3), GunKind::Pistol)];
+    board.bullets = vec![(p(10, 2), Direction::Right)];
+    board.beams = vec![
+        (Direction::Right, (5..15).map(|x| p(x, 9)).collect()),
+        (Direction::Up, (1..8).map(|y| p(20, y)).collect()),
+    ];
+    for snake in &mut board.snakes {
+        snake.gun = Some((GunKind::Laser, Duration::from_millis(2500)));
+    }
+    views.push(view);
 
     let mut round = Room::new_match(settings, 2, (1..=8).map(entrant).collect());
     views.push(round.view());
@@ -435,6 +457,20 @@ fn online_screens(rules: &Rules) -> Vec<App> {
     leaving.enter_room(2, Arc::new(running.clone()));
     leaving.online.room.as_mut().unwrap().confirm_leave = true;
     apps.push(leaving);
+    // Holding a gun, in the round with guns.
+    let armed = views
+        .iter()
+        .find(|v| v.game.board.as_ref().is_some_and(|b| !b.beams.is_empty()))
+        .expect("a round with guns");
+    let mut app = new_app(Screen::Room);
+    app.enter_room(1, Arc::new(armed.clone()));
+    apps.push(app);
+    // Quick play's choice of pools, at each.
+    for selected in 0..2 {
+        let mut app = new_app(Screen::Game);
+        snake(&mut app).screen = SnakeScreen::QuickPlay { selected };
+        apps.push(app);
+    }
     apps
 }
 

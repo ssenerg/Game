@@ -355,3 +355,12 @@ pub async fn http_get(addr: SocketAddr, path: &str) -> (u16, String) {
 pub const ENTER: &[u8] = b"\r";
 pub const ESC: &[u8] = b"\x1b";
 pub const CTRL_C: &[u8] = b"\x03";
+
+/// Past Snake's choice of quick-play pools, once quick play is chosen:
+/// Enter on the pool it opens at, the classic one unless the player picked
+/// guns before, then waiting in it.
+pub async fn snake_queue(p: &mut Player) {
+    p.wait_for("QUICK PLAY").await;
+    p.send(ENTER).await;
+    p.wait_for("Finding a match").await;
+}

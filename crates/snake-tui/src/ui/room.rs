@@ -13,10 +13,11 @@ use shell_tui::online::InRoom;
 use shell_tui::ui::{dialog, dim, ping_style, ping_text, secs};
 use snake_core::config::ColorSlot;
 use snake_core::geom::Point;
+use snake_core::guns::GunKind;
 use snake_core::round::{PhaseView, RoomView};
 use snake_core::view::MatchView;
 
-use super::board::{BoardWidget, SnakeLook};
+use super::board::{BoardWidget, SnakeLook, gun_look};
 use crate::app::{SnakeUi, racer, snake_view};
 use crate::palette::{opponent_colors, theme_color};
 
@@ -162,12 +163,17 @@ fn draw_match(frame: &mut Frame, app: &SnakeUi, room: &InRoom, view: &RoomView, 
     frame.render_widget(widget, inner);
 
     if score_w > 0 {
-        draw_scores(frame, room, view, &looks, score_rect);
+        draw_scores(frame, room, view, board, &looks, score_rect);
     }
     let (need_w, need_h) = room_size(board.width, board.height);
     let playing = app.in_play(room);
+    let held = room
+        .my_seat()
+        .and_then(|s| s.slot)
+        .and_then(|slot| board.snakes.iter().find(|s| s.id == slot))
+        .and_then(|s| s.gun);
     frame.render_widget(
-        Paragraph::new(status_line(room, playing, cropped, need_w, need_h))
+        Paragraph::new(status_line(room, playing, held, cropped, need_w, need_h))
             .alignment(Alignment::Center),
         status,
     );
@@ -176,7 +182,14 @@ fn draw_match(frame: &mut Frame, app: &SnakeUi, room: &InRoom, view: &RoomView, 
     }
 }
 
-fn draw_scores(frame: &mut Frame, room: &InRoom, view: &RoomView, looks: &[SnakeLook], rect: Rect) {
+fn draw_scores(
+    frame: &mut Frame,
+    room: &InRoom,
+    view: &RoomView,
+    board: &MatchView,
+    looks: &[SnakeLook],
+    rect: Rect,
+) {
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(dim())
@@ -196,6 +209,11 @@ fn draw_scores(frame: &mut Frame, room: &InRoom, view: &RoomView, looks: &[Snake
         })
         .collect();
     seats.sort_by_key(|&(s, alive, length)| std::cmp::Reverse((s.slot.is_some(), alive, length)));
+    let gun = |slot: Option<u8>| {
+        let slot = slot?;
+        let (kind, _) = board.snakes.iter().find(|s| s.id == slot)?.gun?;
+        Some(gun_look(kind))
+    };
     let followed = room.followed().map(|s| s.who.id);
     // Round trips go last, as numbers if names keep 8 columns, or else as
     // a dot in their color.
@@ -229,7 +247,15 @@ fn draw_scores(frame: &mut Frame, room: &InRoom, view: &RoomView, looks: &[Snake
             } else {
                 dim()
             };
-            spans.push(Span::styled(format!(" {name:<name_w$}"), style));
+            // A gun it holds goes in the space before the name.
+            match gun(seat.slot) {
+                Some((icon, color)) => spans.push(Span::styled(
+                    icon,
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                )),
+                None => spans.push(Span::raw(" ")),
+            }
+            spans.push(Span::styled(format!("{name:<name_w$}"), style));
             if seat.slot.is_some() {
                 spans.push(Span::styled(format!("{length:>4}"), style));
             } else if ping_w > 0 {
@@ -261,6 +287,7 @@ fn draw_scores(frame: &mut Frame, room: &InRoom, view: &RoomView, looks: &[Snake
 fn status_line(
     room: &InRoom,
     playing: bool,
+    held: Option<(GunKind, Duration)>,
     cropped: bool,
     need_w: u16,
     need_h: u16,
@@ -289,7 +316,20 @@ fn status_line(
         PhaseView::Running { .. } if !playing => {
             Line::styled("You're out · watching the rest · Esc leave", dim())
         }
-        PhaseView::Running { .. } => Line::styled("←↑↓→ move · Esc leave", dim()),
+        PhaseView::Running { .. } => match held {
+            Some((kind, left)) => {
+                let (icon, color) = gun_look(kind);
+                let bold = Style::default().fg(color).add_modifier(Modifier::BOLD);
+                Line::from(vec![
+                    Span::styled(
+                        format!("{icon} {} · f fire · {} s", kind.name(), secs(left).max(1)),
+                        bold,
+                    ),
+                    Span::styled(" · ←↑↓→ move · Esc leave", dim()),
+                ])
+            }
+            None => Line::styled("←↑↓→ move · Esc leave", dim()),
+        },
         _ => Line::default(),
     }
 }

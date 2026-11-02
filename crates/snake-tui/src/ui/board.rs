@@ -3,7 +3,8 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::Widget;
 use snake_core::config::{ColorSlot, IconSlot, Theme};
-use snake_core::geom::Point;
+use snake_core::geom::{Direction, Point};
+use snake_core::guns::GunKind;
 use snake_core::view::MatchView;
 use snake_core::world::FoodKind;
 
@@ -12,6 +13,19 @@ use crate::palette::theme_color;
 const BLOCK: [&str; 2] = ["█", "█"];
 const EMPTY: [&str; 2] = [" ", " "];
 const DIGITS: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
+/// A laser's beam fills both columns of a cell going across, and the first
+/// going up or down, so it reads as one line.
+const BEAM_ACROSS: [&str; 2] = ["━", "━"];
+const BEAM_DOWN: [&str; 2] = ["┃", " "];
+const BEAM_COLOR: Color = Color::LightCyan;
+
+/// How a gun shows, on the board and beside it.
+pub fn gun_look(kind: GunKind) -> (&'static str, Color) {
+    match kind {
+        GunKind::Laser => ("↯", BEAM_COLOR),
+        GunKind::Pistol => ("⌐", Color::White),
+    }
+}
 
 /// How one snake is drawn in multiplayer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,7 +37,8 @@ pub struct SnakeLook {
 }
 
 /// Draws a board straight into the buffer, two terminal columns per cell.
-/// Heads go on top of bodies, bodies on top of food, food on top of walls.
+/// From the bottom: walls, food, guns, bodies, bullets and beams, then
+/// heads on top.
 pub struct BoardWidget<'a> {
     pub view: &'a MatchView,
     pub theme: &'a Theme,
@@ -93,6 +108,10 @@ impl Widget for BoardWidget<'_> {
             let style = plain(theme_color(theme, color)).add_modifier(Modifier::BOLD);
             paint(p, [theme.icon(icon), " "], style);
         }
+        for &(p, kind) in &view.guns {
+            let (icon, color) = gun_look(kind);
+            paint(p, [icon, " "], plain(color).add_modifier(Modifier::BOLD));
+        }
         let look = |id: u8| {
             looks
                 .and_then(|l| l.get(id as usize).copied())
@@ -106,6 +125,22 @@ impl Widget for BoardWidget<'_> {
             let body = look(snake.id).body;
             for &p in snake.body.iter().skip(1) {
                 paint(p, BLOCK, plain(body));
+            }
+        }
+        for &(p, _) in &view.bullets {
+            paint(
+                p,
+                ["•", " "],
+                plain(Color::White).add_modifier(Modifier::BOLD),
+            );
+        }
+        for (dir, cells) in &view.beams {
+            let line = match dir {
+                Direction::Left | Direction::Right => BEAM_ACROSS,
+                Direction::Up | Direction::Down => BEAM_DOWN,
+            };
+            for &p in cells {
+                paint(p, line, plain(BEAM_COLOR).add_modifier(Modifier::BOLD));
             }
         }
         for snake in &view.snakes {

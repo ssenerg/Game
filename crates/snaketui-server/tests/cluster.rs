@@ -103,7 +103,7 @@ async fn cluster(n: usize) -> Vec<ServerProcess> {
 async fn quick_play(p: &mut Player) {
     p.send(DOWN).await;
     p.send(ENTER).await;
-    p.wait_for("Finding a match").await;
+    snake_queue(p).await;
 }
 
 /// Waits until `p`'s match has started its countdown.
@@ -419,6 +419,7 @@ async fn a_match_across_servers_counts_for_both_players() {
     // Signing up leaves the cursor on Quick play.
     for p in [&mut ann, &mut ben] {
         p.send(ENTER).await;
+        snake_queue(p).await;
     }
     for p in [&mut ann, &mut ben] {
         in_a_match(p, Duration::from_secs(10)).await;

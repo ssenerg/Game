@@ -57,6 +57,7 @@ pub enum Section {
     Board,
     Food,
     Gameplay,
+    Guns,
     Icons,
     Colors,
 }
@@ -67,6 +68,8 @@ impl Section {
             Section::Board => "Board",
             Section::Food => "Food",
             Section::Gameplay => "Gameplay",
+            // Single player has nobody to shoot.
+            Section::Guns => "Guns (rooms)",
             Section::Icons => "Icons",
             Section::Colors => "Colors",
         }
@@ -88,7 +91,7 @@ impl Setting {
     pub fn in_rooms(&self) -> bool {
         matches!(
             self.section,
-            Section::Board | Section::Food | Section::Gameplay
+            Section::Board | Section::Food | Section::Gameplay | Section::Guns
         ) && !matches!(self.key, "move_timing" | "boost_duration_s")
     }
 }
@@ -309,6 +312,56 @@ pub const SETTINGS: &[Setting] = &[
             max: 60,
             step: 1,
             fmt: NumFmt::SecsOrOff,
+        },
+    },
+    Setting {
+        label: "guns",
+        key: "guns",
+        section: Section::Guns,
+        kind: Kind::Choice {
+            get: |c| c.rules.guns as usize,
+            set: |c, i| c.rules.guns = i != 0,
+            saved: &["false", "true"],
+            shown: &["off", "on"],
+        },
+    },
+    Setting {
+        label: "gun spawns every",
+        key: "gun_interval_s",
+        section: Section::Guns,
+        kind: Kind::Num {
+            get: |c| c.rules.gun_interval_s,
+            set: |c, v| c.rules.gun_interval_s = v,
+            min: 3,
+            max: 60,
+            step: 1,
+            fmt: NumFmt::Secs,
+        },
+    },
+    Setting {
+        label: "gun lifetime",
+        key: "gun_ttl_s",
+        section: Section::Guns,
+        kind: Kind::Num {
+            get: |c| c.rules.gun_ttl_s,
+            set: |c, v| c.rules.gun_ttl_s = v,
+            min: 1,
+            max: 60,
+            step: 1,
+            fmt: NumFmt::Secs,
+        },
+    },
+    Setting {
+        label: "time to fire",
+        key: "gun_hold_s",
+        section: Section::Guns,
+        kind: Kind::Num {
+            get: |c| c.rules.gun_hold_s,
+            set: |c, v| c.rules.gun_hold_s = v,
+            min: 1,
+            max: 30,
+            step: 1,
+            fmt: NumFmt::Secs,
         },
     },
     Setting {

@@ -12,7 +12,7 @@ use shell_tui::Ctx;
 
 use crate::app::{SnakeScreen, SnakeUi};
 
-pub use board::{BoardWidget, SnakeLook};
+pub use board::{BoardWidget, SnakeLook, gun_look};
 pub use game::board_fits;
 pub(crate) use menu::LOGO;
 pub(crate) use room::draw_round;
@@ -31,5 +31,6 @@ pub(crate) fn draw(frame: &mut Frame, ui: &SnakeUi, ctx: &Ctx) {
             dialogs::draw_game_over(frame, ui, new_record);
         }
         SnakeScreen::RoomRules { selected } => room_rules::draw(frame, ui, ctx, selected),
+        SnakeScreen::QuickPlay { selected } => dialogs::draw_quick_play(frame, ui, selected),
     }
 }

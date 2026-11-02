@@ -9,6 +9,7 @@ pub mod board;
 pub mod bot;
 pub mod config;
 pub mod geom;
+pub mod guns;
 pub mod records;
 pub mod round;
 pub mod settings;

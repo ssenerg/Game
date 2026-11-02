@@ -218,6 +218,14 @@ pub struct Rules {
     pub super_growth: u32,
     pub boost_duration_s: u64,
     pub move_timing: MoveTiming,
+    /// Whether guns appear on the board. Only rooms have them: single
+    /// player has nobody to shoot.
+    pub guns: bool,
+    pub gun_interval_s: u64,
+    /// How long a gun stays on the board if nobody takes it.
+    pub gun_ttl_s: u64,
+    /// How long a snake that takes a gun has to fire it.
+    pub gun_hold_s: u64,
 }
 
 impl Default for Rules {
@@ -239,6 +247,10 @@ impl Default for Rules {
             super_growth: 3,
             boost_duration_s: 5,
             move_timing: MoveTiming::Instant,
+            guns: false,
+            gun_interval_s: 10,
+            gun_ttl_s: 8,
+            gun_hold_s: 5,
         }
     }
 }
@@ -246,7 +258,8 @@ impl Default for Rules {
 impl Rules {
     /// Identifies these rules in the records file. The format is stored on
     /// disk, so changing it orphans existing records. Settings added later
-    /// are appended only when they differ from the old behaviour.
+    /// are appended only when they differ from the old behaviour. Guns
+    /// aren't: records are single player's, which has none.
     pub fn record_key(&self) -> String {
         let mut key = format!(
             "size:{}x{} tick:{} edge:{} inner:{} food:{}/{} super:{}/{} poison:{}/{} growth:{} ghost:{} supergrow:{} boost:{}",

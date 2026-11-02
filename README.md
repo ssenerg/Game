@@ -79,19 +79,20 @@ Rooms hold 2 to 8 players on one board. Every snake moves on the same tick,
 so in multiplayer turns are always queued for the next tick, and super food
 gives no speed boost.
 
-- **Quick play** puts you in a queue. A match starts as soon as 8 players
+- **Quick play** asks which queue: **Classic**, or **Guns** (see below).
+  It opens at the one you played last. A match starts as soon as 8 players
   are waiting, or after 10 seconds with at least 2. It plays one round on a
-  30×18 board, which fits an 80×23 terminal. Matches are rated. After 20
-  seconds with nobody to play, press `b` for a match against 3 bots
-  instead; it isn't rated.
+  30×18 board, which fits an 80×23 terminal. Matches are rated, each queue
+  apart. After 20 seconds with nobody to play, press `b` for a match against
+  3 bots instead; it isn't rated.
 - **Private rooms** use your single-player settings and get a 6-character
   code to share. Anyone with the code can join. A round starts 15 seconds
   after the second player arrives, or as soon as everyone presses Enter.
   Rounds keep going until everyone leaves.
 - **Room rules.** In a private room's lobby, press `e` to see the room's
-  rules: the board, food and gameplay settings. The host (whoever has been in
-  the room longest) changes any of them there with ←→, and makes the next
-  rounds faster or slower with ←→ right in the lobby. Everyone else is told
+  rules: the board, food, gameplay and guns settings. The host (whoever has
+  been in the room longest) changes any of them there with ←→, and makes the
+  next rounds faster or slower with ←→ right in the lobby. Everyone else is told
   what changed. A change un-readies everyone and restarts the 15 seconds, so
   nobody starts by rules they didn't see. A board too small for everyone
   already in the room is refused. The changes belong to the room; the host's
@@ -103,6 +104,22 @@ gives no speed boost.
   bodies, poison and dead ends. Bots are named after snakes (Viper, Cobra,
   and so on), and accounts can't take those names. Once every person's snake
   is out, the round ends: the longest bot left wins.
+- **Guns.** With guns on, in the Guns queue or a room whose host turns them
+  on, a gun appears on the board every 10 seconds and stays 8 seconds if
+  nobody takes it. Drive your head onto it to take it; you then have 5
+  seconds to fire it with `f`, straight ahead from your head, or it's gone.
+  Taking another gun before firing swaps it for the new one. There are two:
+  - the **laser** `↯` hits at once along the whole line, through every snake
+    in it, up to a wall or the board's edge (it never wraps);
+  - the **pistol** `⌐` fires one bullet, 3 cells a tick, which stops at the
+    first snake it hits.
+
+  A shot to the head kills that snake. A shot to the body cuts the snake
+  there, and the piece behind turns into food; a snake hit twice keeps only
+  what's in front of the hit nearest its head. Your own shots never hit
+  you. A room's host sets how often guns come, how long they stay, and
+  how long you have to fire. Bots go for guns too, and fire when a snake is
+  in their line. Single player has no guns.
 - **Winning.** The last snake alive wins. If all the snakes still in play
   crash on the same tick, it's a draw. After 3 minutes, the longest snake
   still alive wins.
@@ -399,6 +416,7 @@ Letter keys work the same with Shift or Caps Lock on.
 | pass through self | If `yes`, the snake can cross its own body |
 | super food growth | Length gained from super food |
 | super food speed boost | Duration of the 2× speed boost (`off` disables) |
+| guns | Guns in rooms you make (single player has none); with how often one spawns, its lifetime, and the time to fire one |
 | food / super food / poison icon | Glyph drawn on the board (dot, star, heart, cross, …) |
 | colors | Per-cell-type colors (head, body, food, super food, poison, walls, background) |
 

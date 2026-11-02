@@ -13,6 +13,9 @@ pub use game_api::RatingKey;
 /// Snake's quick play, every snake for itself.
 pub const SNAKE_QUICK: RatingKey = snake_core::round::QUICK_RATING;
 
+/// Snake's quick play with guns.
+pub const SNAKE_GUNS: RatingKey = snake_core::round::GUNS_RATING;
+
 /// A player's estimated skill, `mu`, and how unsure that estimate is,
 /// `sigma`.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]

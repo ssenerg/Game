@@ -10,18 +10,30 @@ use ratatui::layout::Size;
 use ratatui::style::Color;
 use ratatui::text::Span;
 use shell_tui::online::{Category, InRoom};
-use shell_tui::{Ctx, GameFx, GameUi, Key, Next, QuickPlay, QuickStart, Reply, Saved};
+use shell_tui::{Ctx, GameFx, GameUi, Key, Next, QuickStart, Reply, Saved};
 use snake_core::config::{GameConfig, Rules, TICK_MS_MAX, TICK_MS_MIN, TICK_MS_STEP};
 use snake_core::geom::Direction;
 use snake_core::records::Records;
 use snake_core::round::{
-    PhaseView, QUICK_POOL, QUICK_RATING, RacerView, RoomView, SeatView, Snake, max_players_for,
-    quick_rules,
+    GUNS_POOL, GUNS_RATING, PhaseView, QUICK_POOL, QUICK_RATING, RacerView, RoomView, SeatView,
+    Snake, SnakeInput, max_players_for,
 };
 use snake_core::settings::{SETTINGS, room_settings};
 use snake_core::solo::SoloGame;
 
 use crate::ui;
+
+/// Quick play's pools, as the player picks one: the pool, its name, and
+/// what it is.
+pub const QUICK_POOLS: [(&str, &str, &str); 2] = [
+    (QUICK_POOL, "Classic", "every snake for itself"),
+    (GUNS_POOL, "Guns", "lasers and pistols on the board"),
+];
+
+/// The prefs line that keeps the quick-play pool last picked, after the
+/// settings' own. It's left out for the first, so prefs saved before guns
+/// read the same.
+const QUICK_PREF: &str = "quick=";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SnakeScreen {
@@ -37,6 +49,10 @@ pub enum SnakeScreen {
     /// A private room's rules, at [`room_settings`] entry `selected`. The
     /// host changes them.
     RoomRules {
+        selected: usize,
+    },
+    /// Quick play's pools, at [`QUICK_POOLS`] entry `selected`.
+    QuickPlay {
         selected: usize,
     },
 }
@@ -55,6 +71,8 @@ pub struct SnakeUi {
     pub confirm_reset: bool,
     /// The terminal the game is drawn on. Set it with [`GameUi::resize`].
     pub size: Size,
+    /// The [`QUICK_POOLS`] entry quick play opens at: the one last played.
+    pub quick: usize,
 }
 
 impl Default for SnakeUi {
@@ -86,7 +104,18 @@ impl SnakeUi {
             screen: SnakeScreen::Menu,
             confirm_reset: false,
             size: Size::new(0, 0),
+            quick: 0,
         }
+    }
+
+    /// The prefs as saved: the settings, and the quick-play pool if it
+    /// isn't the first.
+    fn prefs(&self) -> String {
+        let mut text = self.cfg.to_saved_text();
+        if self.quick > 0 {
+            text.push_str(&format!("{QUICK_PREF}{}\n", QUICK_POOLS[self.quick].0));
+        }
+        text
     }
 
     /// How long the local game may wait for a key before ticking.
@@ -112,7 +141,7 @@ impl SnakeUi {
 
     fn start_game(&mut self, fx: &mut Vec<GameFx>) {
         if let Ok(game) = SoloGame::new(self.cfg.rules.clone()) {
-            fx.push(GameFx::SavePrefs(self.cfg.to_saved_text()));
+            fx.push(GameFx::SavePrefs(self.prefs()));
             self.record = self.records.get(&game.rules().record_key());
             self.game = Some(game);
             self.screen = SnakeScreen::Playing;
@@ -190,6 +219,30 @@ impl SnakeUi {
             _ => Reply::default(),
         }
     }
+
+    /// Picking a quick-play pool: Enter waits in it.
+    fn quick_play_key(&mut self, selected: usize, key: Key) -> Reply {
+        if let Some(selected) = key.step(selected, QUICK_POOLS.len()) {
+            self.screen = SnakeScreen::QuickPlay { selected };
+            return Reply::default();
+        }
+        match key {
+            Key::Enter => {
+                self.quick = selected;
+                self.screen = SnakeScreen::Menu;
+                Reply {
+                    fx: vec![GameFx::SavePrefs(self.prefs())],
+                    next: Next::Queue(QUICK_POOLS[selected].0),
+                    ..Reply::default()
+                }
+            }
+            Key::Esc | Key::Char('q') => {
+                self.screen = SnakeScreen::Menu;
+                Reply::to(Next::Home)
+            }
+            _ => Reply::default(),
+        }
+    }
 }
 
 pub(crate) fn direction(key: Key) -> Option<Direction> {
@@ -258,27 +311,32 @@ impl GameUi for SnakeUi {
         encode(&self.cfg.rules)
     }
 
-    fn quick_play(&mut self, size: Size) -> Result<QuickStart, String> {
-        let rules = quick_rules();
-        let too_small = (!ui::room_fits(rules.width, rules.height, size)).then(|| {
-            let (w, h) = ui::room_size(rules.width, rules.height);
-            format!(
-                "Your terminal is {}×{}; matches need {w}×{h} to show the whole board. \
-                 Press Enter again to play anyway.",
-                size.width, size.height
-            )
-        });
-        Ok(QuickStart::Queue(QuickPlay {
-            pool: QUICK_POOL,
-            too_small,
-        }))
+    /// Opens the choice of pools, at the one last played.
+    fn quick_play(&mut self, _: Size) -> Result<QuickStart, String> {
+        self.screen = SnakeScreen::QuickPlay {
+            selected: self.quick,
+        };
+        Ok(QuickStart::Choose)
+    }
+
+    fn pool_name(&self, pool: &str) -> Option<String> {
+        QUICK_POOLS
+            .iter()
+            .find(|(id, ..)| *id == pool)
+            .map(|(_, name, _)| name.to_string())
     }
 
     fn ratings(&self) -> &'static [Category] {
-        &[Category {
-            id: QUICK_RATING.category,
-            label: "Quick play",
-        }]
+        &[
+            Category {
+                id: QUICK_RATING.category,
+                label: "Classic",
+            },
+            Category {
+                id: GUNS_RATING.category,
+                label: "Guns",
+            },
+        ]
     }
 
     fn bots(&self) -> bool {
@@ -325,6 +383,7 @@ impl GameUi for SnakeUi {
             SnakeScreen::RoomRules { selected } => {
                 reply = self.room_rules_key(selected, key, ctx.room);
             }
+            SnakeScreen::QuickPlay { selected } => reply = self.quick_play_key(selected, key),
         }
         self.pause_if_hidden();
         reply
@@ -413,7 +472,11 @@ impl GameUi for SnakeUi {
                 _ => None,
             },
             PhaseView::Countdown { .. } | PhaseView::Running { .. } if self.in_play(room) => {
-                direction(key).map(|dir| Reply::fx(GameFx::Play(encode(&dir))))
+                let input = match key {
+                    Key::Char('f') => SnakeInput::Fire,
+                    key => SnakeInput::Turn(direction(key)?),
+                };
+                Some(Reply::fx(GameFx::Play(encode(&input))))
             }
             _ => None,
         }
@@ -440,10 +503,14 @@ impl GameUi for SnakeUi {
         } else {
             Span::styled(tick, dim)
         };
-        vec![
+        let mut line = vec![
             Span::styled(format!("{}×{} board · ", rules.width, rules.height), dim),
             tick,
-        ]
+        ];
+        if rules.guns {
+            line.push(Span::styled(" · guns", dim));
+        }
+        line
     }
 
     fn lobby_keys(&self) -> Option<&'static str> {
@@ -475,12 +542,18 @@ impl GameUi for SnakeUi {
 
     fn restore(&mut self, saved: Saved) {
         self.cfg = GameConfig::from_saved_text(&saved.prefs);
+        self.quick = saved
+            .prefs
+            .lines()
+            .find_map(|line| line.strip_prefix(QUICK_PREF))
+            .and_then(|pool| QUICK_POOLS.iter().position(|(id, ..)| *id == pool.trim()))
+            .unwrap_or_default();
         self.records = saved.records;
     }
 
     fn saved(&self) -> Saved {
         Saved {
-            prefs: self.cfg.to_saved_text(),
+            prefs: self.prefs(),
             records: self.records.clone(),
         }
     }

@@ -1719,7 +1719,9 @@ mod tests {
     fn database_actions_are_costly_and_moves_are_not() {
         assert!(costly(&Effect::AddFriend("ann".into())));
         assert!(costly(&Effect::JoinRoom("ABCDEF".into())));
-        let steer = GameFx::Play(games::encode(&snake_core::geom::Direction::Up));
+        let steer = GameFx::Play(games::encode(&snake_core::round::SnakeInput::Turn(
+            snake_core::geom::Direction::Up,
+        )));
         assert!(!costly(&Effect::Game(GameId::Snake, steer)));
         assert!(
             !costly(&Effect::LoadLeaderboard(crate::rating::SNAKE_QUICK)),

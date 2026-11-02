@@ -121,10 +121,12 @@ impl SoloGame {
         if let Some(&(_, cause)) = outcome.deaths.first() {
             self.over = Some(match cause {
                 DeathCause::Wall => GameOverReason::HitWall,
-                // A lone snake can only hit itself, and never leaves mid-step.
-                DeathCause::OwnBody | DeathCause::OtherSnake | DeathCause::Left => {
-                    GameOverReason::HitSelf
-                }
+                // A lone snake can only hit itself: nobody shoots it, and it
+                // never leaves mid-step.
+                DeathCause::OwnBody
+                | DeathCause::OtherSnake
+                | DeathCause::Shot
+                | DeathCause::Left => GameOverReason::HitSelf,
                 DeathCause::Poison => GameOverReason::Poisoned,
             });
             return;

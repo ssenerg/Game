@@ -1,7 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::geom::Point;
+use crate::geom::{Direction, Point};
+use crate::guns::GunKind;
 use crate::world::FoodKind;
 
 /// Everything needed to draw a board, detached from the [`crate::world::World`]
@@ -16,6 +17,12 @@ pub struct MatchView {
     pub walls: Arc<[bool]>,
     pub snakes: Vec<SnakeView>,
     pub foods: Vec<(Point, FoodKind)>,
+    /// Guns waiting to be taken.
+    pub guns: Vec<(Point, GunKind)>,
+    /// Pistols' bullets in flight, and which way each goes.
+    pub bullets: Vec<(Point, Direction)>,
+    /// The cells lasers lit a moment ago, with the way each went.
+    pub beams: Vec<(Direction, Vec<Point>)>,
     pub clock: Duration,
 }
 
@@ -26,6 +33,8 @@ pub struct SnakeView {
     /// Head first; empty once a dead snake has turned into food.
     pub body: Vec<Point>,
     pub alive: bool,
+    /// The gun it holds, and how long it has left to fire it.
+    pub gun: Option<(GunKind, Duration)>,
 }
 
 impl MatchView {

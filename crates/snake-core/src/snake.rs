@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 
 use crate::config::GrowthMode;
 use crate::geom::{Direction, Point, wrap_next};
+use crate::guns::Held;
 
 /// How many turns a snake can have queued for upcoming ticks.
 pub const QUEUE_CAP: usize = 3;
@@ -13,6 +14,8 @@ pub enum DeathCause {
     /// Another snake's head or body, including head-on crashes.
     OtherSnake,
     Poison,
+    /// A shot to the head.
+    Shot,
     /// The player left the match.
     Left,
 }
@@ -29,6 +32,9 @@ pub struct Snake {
     /// At-tail growth: steps left until each pending segment is added.
     growth: Vec<u32>,
     pub death: Option<DeathCause>,
+    pub gun: Option<Held>,
+    /// It fires its gun on the next step.
+    pub(crate) firing: bool,
 }
 
 impl Snake {
@@ -40,6 +46,8 @@ impl Snake {
             queue: VecDeque::new(),
             growth: Vec::new(),
             death: None,
+            gun: None,
+            firing: false,
         }
     }
 
@@ -152,6 +160,18 @@ impl Snake {
                 }
             }
         }
+    }
+
+    /// Keeps the first `len` cells, at least one, and returns the rest. Food
+    /// still on its way to the tail goes with the piece it was in, reckoned
+    /// by how far it has left to go.
+    pub(crate) fn cut(&mut self, len: usize) -> Vec<Point> {
+        let lost = self.len().saturating_sub(len) as u32;
+        self.growth.retain_mut(|t| {
+            *t = t.saturating_sub(lost);
+            *t > 0
+        });
+        self.body.split_off(len).into()
     }
 }
 
