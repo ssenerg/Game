@@ -180,6 +180,8 @@ pub struct App {
     /// The pictures each frame shows, once the terminal is known to show
     /// them.
     pictures: Option<Pictures>,
+    /// The terminal says when keys are let go.
+    key_releases: bool,
 }
 
 impl App {
@@ -206,6 +208,7 @@ impl App {
             opened: false,
             game_item: HomeItem::Game(0),
             pictures: None,
+            key_releases: false,
         };
         let start = start.and_then(|game| app.index_of(game));
         if let Some(i) = start.or_else(|| (app.games.len() == 1).then_some(0)) {
@@ -265,6 +268,7 @@ impl App {
             account: self.online.account.as_ref(),
             pictures: self.pictures.as_ref(),
             notice: self.online.notice.as_deref(),
+            key_releases: self.key_releases,
         }
     }
 
@@ -274,6 +278,12 @@ impl App {
         self.pictures = Some(Pictures::new(cell));
     }
 
+    /// The terminal says when keys are let go: from now, screens that want
+    /// to hear it get [`Key::Released`].
+    pub fn hear_key_releases(&mut self) {
+        self.key_releases = true;
+    }
+
     /// The pictures the last frame showed, if the terminal shows them.
     pub fn pictures(&self) -> Option<&Pictures> {
         self.pictures.as_ref()
@@ -281,12 +291,36 @@ impl App {
 
     /// Whether what shows now takes the mouse, as its game says.
     pub fn wants_mouse(&self) -> bool {
+        self.showing_wants(
+            |game| game.wants_mouse(),
+            |game, room| game.room_wants_mouse(room),
+        )
+    }
+
+    /// Whether what shows now hears keys let go, as its game says, on a
+    /// terminal that says so.
+    pub fn wants_key_releases(&self) -> bool {
+        self.key_releases
+            && self.showing_wants(
+                |game| game.wants_key_releases(),
+                |game, room| game.room_wants_key_releases(room),
+            )
+    }
+
+    /// What the game showing now says, by `screens` for its own screens or
+    /// `rooms` for its room; `false` on the app's screens.
+    fn showing_wants(
+        &self,
+        screens: impl Fn(&dyn GameUi) -> bool,
+        rooms: impl Fn(&dyn GameUi, &InRoom) -> bool,
+    ) -> bool {
         match self.screen {
-            Screen::Game => self.ui().wants_mouse(),
-            Screen::Room => self.online.room.as_ref().is_some_and(|room| {
-                let i = self.index_of(room.view.game()).unwrap_or(self.open);
-                self.games[i].room_wants_mouse(room)
-            }),
+            Screen::Game => screens(self.ui()),
+            Screen::Room => self
+                .online
+                .room
+                .as_ref()
+                .is_some_and(|room| rooms(self.room_ui(room), room)),
             _ => false,
         }
     }
@@ -357,8 +391,11 @@ impl App {
         let raw = key;
         let typing = matches!(self.screen, Screen::Input(_) | Screen::Form(_));
         let key = if typing { key } else { key.lower() };
-        // Only a game that asked for the mouse hears it.
-        if matches!(key, Key::Mouse(_)) && !self.wants_mouse() {
+        // Only a game that asked for the mouse hears it, and only one that
+        // asked for keys let go hears those.
+        if matches!(key, Key::Mouse(_)) && !self.wants_mouse()
+            || matches!(key, Key::Released(_)) && !self.wants_key_releases()
+        {
             return;
         }
         if key == Key::CtrlC {
@@ -416,6 +453,7 @@ impl App {
             account: self.online.account.as_ref(),
             pictures: self.pictures.as_ref(),
             notice: None,
+            key_releases: self.key_releases,
         };
         let reply = self.games[self.open].key(key, &ctx);
         self.follow(self.open, reply, effects);

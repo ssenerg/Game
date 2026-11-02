@@ -16,6 +16,7 @@ pub enum NumFmt {
     /// A count, or "none" for 0.
     OrNone,
     PerTick,
+    Cells,
 }
 
 impl NumFmt {
@@ -40,6 +41,7 @@ impl NumFmt {
                 }
             }
             NumFmt::PerTick => format!("{v} cells a tick"),
+            NumFmt::Cells => format!("{v} cells"),
         }
     }
 }
@@ -376,7 +378,7 @@ pub const SETTINGS: &[Setting] = &[
         },
     },
     Setting {
-        label: "time to fire",
+        label: "time to use it",
         key: "gun_hold_s",
         section: Section::Guns,
         kind: Kind::Num {
@@ -399,6 +401,84 @@ pub const SETTINGS: &[Setting] = &[
             max: 6,
             step: 1,
             fmt: NumFmt::PerTick,
+        },
+    },
+    Setting {
+        label: "thrown items spawn every",
+        key: "thrown_interval_s",
+        section: Section::Guns,
+        kind: Kind::Num {
+            get: |c| c.rules.thrown_interval_s,
+            set: |c, v| c.rules.thrown_interval_s = v,
+            min: 0,
+            max: 60,
+            step: 1,
+            fmt: NumFmt::SecsOrOff,
+        },
+    },
+    Setting {
+        label: "thrown item lifetime",
+        key: "thrown_ttl_s",
+        section: Section::Guns,
+        kind: Kind::Num {
+            get: |c| c.rules.thrown_ttl_s,
+            set: |c, v| c.rules.thrown_ttl_s = v,
+            min: 1,
+            max: 60,
+            step: 1,
+            fmt: NumFmt::Secs,
+        },
+    },
+    Setting {
+        label: "grenade blast radius",
+        key: "grenade_radius",
+        section: Section::Guns,
+        kind: Kind::Num {
+            get: |c| c.rules.grenade_radius as u64,
+            set: |c, v| c.rules.grenade_radius = v as u16,
+            min: 1,
+            max: 4,
+            step: 1,
+            fmt: NumFmt::Cells,
+        },
+    },
+    Setting {
+        label: "flashbang lasts",
+        key: "flash_s",
+        section: Section::Guns,
+        kind: Kind::Num {
+            get: |c| c.rules.flash_s,
+            set: |c, v| c.rules.flash_s = v,
+            min: 1,
+            max: 8,
+            step: 1,
+            fmt: NumFmt::Secs,
+        },
+    },
+    Setting {
+        label: "smoke radius",
+        key: "smoke_radius",
+        section: Section::Guns,
+        kind: Kind::Num {
+            get: |c| c.rules.smoke_radius as u64,
+            set: |c, v| c.rules.smoke_radius = v as u16,
+            min: 1,
+            max: 5,
+            step: 1,
+            fmt: NumFmt::Cells,
+        },
+    },
+    Setting {
+        label: "smoke lasts",
+        key: "smoke_s",
+        section: Section::Guns,
+        kind: Kind::Num {
+            get: |c| c.rules.smoke_s,
+            set: |c, v| c.rules.smoke_s = v,
+            min: 2,
+            max: 20,
+            step: 1,
+            fmt: NumFmt::Secs,
         },
     },
     Setting {
@@ -430,6 +510,24 @@ pub const SETTINGS: &[Setting] = &[
         key: "icon_pistol",
         section: Section::Icons,
         kind: Kind::Icon(IconSlot::Pistol),
+    },
+    Setting {
+        label: "grenade icon",
+        key: "icon_grenade",
+        section: Section::Icons,
+        kind: Kind::Icon(IconSlot::Grenade),
+    },
+    Setting {
+        label: "flashbang icon",
+        key: "icon_flashbang",
+        section: Section::Icons,
+        kind: Kind::Icon(IconSlot::Flashbang),
+    },
+    Setting {
+        label: "smoke icon",
+        key: "icon_smoke",
+        section: Section::Icons,
+        kind: Kind::Icon(IconSlot::Smoke),
     },
     Setting {
         label: "snake head",
@@ -484,6 +582,24 @@ pub const SETTINGS: &[Setting] = &[
         key: "color_pistol",
         section: Section::Colors,
         kind: Kind::Color(ColorSlot::Pistol),
+    },
+    Setting {
+        label: "grenade",
+        key: "color_grenade",
+        section: Section::Colors,
+        kind: Kind::Color(ColorSlot::Grenade),
+    },
+    Setting {
+        label: "flashbang",
+        key: "color_flashbang",
+        section: Section::Colors,
+        kind: Kind::Color(ColorSlot::Flashbang),
+    },
+    Setting {
+        label: "smoke",
+        key: "color_smoke",
+        section: Section::Colors,
+        kind: Kind::Color(ColorSlot::Smoke),
     },
 ];
 

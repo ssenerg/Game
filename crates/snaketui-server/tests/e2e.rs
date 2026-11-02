@@ -398,3 +398,73 @@ async fn a_client_that_falls_behind_gets_the_newest_screen() {
     p.channel.window_change(200, 60, 0, 0).await.unwrap();
     p.wait_for("press an arrow key").await;
 }
+
+/// A terminal's answers to the server's questions, when it speaks Kitty's
+/// keyboard protocol: the flags it has on, then its device attributes.
+const KITTY_KEYS: &[u8] = b"\x1b[?0u\x1b[?62;4c";
+const RELEASES_ON: &[u8] = b"\x1b[>11u";
+const RELEASES_OFF: &[u8] = b"\x1b[<u";
+
+/// From the single-player settings into a game with guns.
+async fn game_with_guns(p: &mut Player) {
+    // Down to the guns row, and on.
+    for _ in 0..17 {
+        p.send(b"\x1b[B").await;
+    }
+    p.send(b"\x1b[C").await;
+    p.wait_for("◂ on ▸").await;
+    p.send(ENTER).await;
+    p.wait_for("press an arrow key").await;
+}
+
+/// How many times the server sent `bytes`.
+fn times(p: &Player, bytes: &[u8]) -> usize {
+    p.raw.windows(bytes.len()).filter(|w| *w == bytes).count()
+}
+
+#[tokio::test]
+async fn a_terminal_that_can_says_when_keys_are_let_go_in_games_with_guns() {
+    let server = TestServer::start();
+    let mut p = Player::join(server.addr, Login::Guest, 100, 40).await;
+    p.answers = Some(KITTY_KEYS);
+    p.single_player().await;
+    p.send(ENTER).await;
+    p.wait_for("press an arrow key").await;
+    p.send(ESC).await;
+    p.wait_for("PAUSED").await;
+    assert!(!p.got(RELEASES_ON), "not without guns");
+    p.send(b"q").await;
+    p.wait_for("Settings").await;
+
+    game_with_guns(&mut p).await;
+    p.wait_until("key releases", Duration::from_secs(5), |p| {
+        p.got(RELEASES_ON)
+    })
+    .await;
+    // Keys come as codes now: f, let go, then Esc pauses, and the
+    // terminal goes back to as it was.
+    p.send(b"\x1b[102u\x1b[102;1:3u\x1b[27u").await;
+    p.wait_for("PAUSED").await;
+    p.wait_until("no key releases", Duration::from_secs(5), |p| {
+        p.got(RELEASES_OFF)
+    })
+    .await;
+    // Back in the game, then out with Ctrl+C as a code.
+    p.send(ESC).await;
+    p.wait_until("key releases again", Duration::from_secs(5), |p| {
+        times(p, RELEASES_ON) == 2
+    })
+    .await;
+    p.send(b"\x1b[99;5u").await;
+    assert_eq!(p.wait_closed(Duration::from_secs(2)).await, Some(0));
+    assert_eq!(times(&p, RELEASES_OFF), 2, "and off on the way out");
+
+    // A terminal that doesn't speak the protocol is never asked to.
+    let mut q = Player::join(server.addr, Login::Guest, 100, 40).await;
+    q.answers = Some(b"\x1b[?62;4c");
+    q.single_player().await;
+    game_with_guns(&mut q).await;
+    q.send(b"f").await;
+    q.wait_for("1 bot").await;
+    assert!(!q.got(RELEASES_ON));
+}

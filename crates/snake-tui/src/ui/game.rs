@@ -5,10 +5,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Padding, Paragraph};
 use snake_core::config::ColorSlot;
 use snake_core::solo::SoloGame;
+use snake_core::view::SnakeView;
 
-use shell_tui::ui::{centered_rect, secs};
+use shell_tui::ui::centered_rect;
 
-use super::board::{BoardWidget, SnakeLook, gun_look};
+use super::board::{BoardWidget, SnakeLook, snake_hints};
 use crate::app::SnakeUi;
 use crate::palette::{opponent_colors, theme_color};
 
@@ -27,7 +28,9 @@ pub fn board_fits(width: u16, height: u16, size: Size) -> bool {
     size.width >= need_w && size.height >= need_h
 }
 
-pub fn draw(frame: &mut Frame, app: &SnakeUi) {
+/// Draws the game. `releases` says whether the player's terminal says when
+/// keys are let go.
+pub fn draw(frame: &mut Frame, app: &SnakeUi, releases: bool) {
     let Some(game) = &app.game else { return };
     let area = frame.area();
 
@@ -51,6 +54,9 @@ pub fn draw(frame: &mut Frame, app: &SnakeUi) {
     } else {
         Color::DarkGray
     };
+    let view = game.world.view();
+    // The player's own snake comes first.
+    let me = view.snakes.first();
     let rect = centered_rect(area, need_w, need_h);
     let block = Block::bordered()
         .border_type(BorderType::Double)
@@ -58,15 +64,15 @@ pub fn draw(frame: &mut Frame, app: &SnakeUi) {
         .padding(Padding::new(PAD_X, PAD_X, PAD_Y, PAD_Y))
         .title_top(title_line())
         .title_top(stats_line(app, game, need_w).right_aligned())
-        .title_bottom(hint_line(app, game).centered());
+        .title_bottom(hint_line(app, game, me, releases).centered());
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
-    let view = game.world.view();
     let looks = looks(app, game);
     let mut board = BoardWidget::new(&view, &app.cfg.theme);
     if game.rules().bots > 0 {
         board.looks = Some(&looks);
     }
+    board.blind = me.is_some_and(|s| s.blind.is_some());
     frame.render_widget(board, inner);
 }
 
@@ -136,14 +142,18 @@ fn stats_line(app: &SnakeUi, game: &SoloGame, board_w: u16) -> Line<'static> {
     Line::from(line)
 }
 
-fn hint_line(app: &SnakeUi, game: &SoloGame) -> Line<'static> {
-    if let Some(held) = game.snake().gun.filter(|_| game.over.is_none()) {
-        let (icon, color) = gun_look(&app.cfg.theme, held.kind);
-        let left = secs(held.until.saturating_sub(game.clock())).max(1);
-        Line::styled(
-            format!(" {icon} {} · f fire · {left} s ", held.kind.name()),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        )
+fn hint_line(
+    app: &SnakeUi,
+    game: &SoloGame,
+    me: Option<&SnakeView>,
+    releases: bool,
+) -> Line<'static> {
+    let hints = me
+        .filter(|_| game.over.is_none())
+        .map_or_else(Vec::new, |s| snake_hints(&app.cfg.theme, s, releases));
+    if !hints.is_empty() {
+        let pad = || Span::raw(" ");
+        Line::from([vec![pad()], hints, vec![pad()]].concat())
     } else if !game.started {
         Line::styled(
             " press an arrow key to start ",

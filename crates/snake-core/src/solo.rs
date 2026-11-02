@@ -76,10 +76,18 @@ impl SoloGame {
         self.world.snakes[1..].iter().filter(|s| s.alive()).count()
     }
 
-    /// Fires the gun the snake holds, on the next tick.
+    /// `f`: fires the gun the snake holds, on the next tick, or starts
+    /// throwing a thrown item, or, already throwing, throws it.
     pub fn fire(&mut self) {
         if self.started && self.over.is_none() {
             self.world.fire(0);
+        }
+    }
+
+    /// `f` let go: a throw on its way lands, on the next tick.
+    pub fn release(&mut self) {
+        if self.started && self.over.is_none() {
+            self.world.release(0);
         }
     }
 
@@ -148,12 +156,7 @@ impl SoloGame {
 
     fn step(&mut self) {
         for id in 1..self.world.snakes.len() as u8 {
-            if let Some(dir) = bot::choose(&self.world, id) {
-                self.world.steer(id, dir);
-                if bot::fires(&self.world, id, dir) {
-                    self.world.fire(id);
-                }
-            }
+            bot::drive(&mut self.world, id);
         }
         let outcome = self.world.step();
         if let Some(&(_, cause)) = outcome.deaths.iter().find(|(id, _)| *id == 0) {
@@ -315,8 +318,8 @@ mod tests {
     fn guns_come_with_a_bot_and_fire_with_f() {
         let mut game = against(1, true);
         assert_eq!(game.rules().bots, 1, "someone to shoot");
-        game.world.snakes[0].gun = Some(crate::guns::Held {
-            kind: crate::guns::GunKind::Pistol,
+        game.world.snakes[0].held = Some(crate::guns::Held {
+            kind: crate::guns::Item::Pistol,
             until: Duration::from_secs(60),
         });
         game.fire();
@@ -325,7 +328,7 @@ mod tests {
         game.fire();
         game.advance(game.tick_interval());
         assert_eq!(game.world.bullets.len(), 1);
-        assert_eq!(game.snake().gun, None);
+        assert_eq!(game.snake().held, None);
     }
 
     #[test]

@@ -10,10 +10,11 @@ use base64::engine::general_purpose::STANDARD;
 use ratatui::layout::Rect;
 use shell_tui::Placement;
 
-/// Asks a terminal what it is, whether it shows Kitty's pictures and how
-/// big its cells are in pixels; then for its device attributes, which
-/// every terminal answers once it has answered the rest.
-pub const PROBE: &[u8] = b"\x1b[>0q\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[16t\x1b[c";
+/// Asks a terminal what it is, whether it shows Kitty's pictures, how big
+/// its cells are in pixels and whether it speaks Kitty's keyboard protocol;
+/// then for its device attributes, which every terminal answers once it has
+/// answered the rest.
+pub const PROBE: &[u8] = b"\x1b[>0q\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[16t\x1b[?u\x1b[c";
 
 /// Kitty takes a picture in pieces of at most this much base64.
 const CHUNK: usize = 4096;

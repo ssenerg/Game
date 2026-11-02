@@ -94,6 +94,11 @@ const LEAVE_SCREEN: &[u8] = b"\x1b[0m\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l"
 /// The terminal reports the mouse's left button, as `CSI <` sequences.
 const MOUSE_ON: &[u8] = b"\x1b[?1000h\x1b[?1006h";
 const MOUSE_OFF: &[u8] = b"\x1b[?1006l\x1b[?1000l";
+/// Kitty's keyboard protocol, for terminals that speak it: keys come as
+/// codes and say when they're let go (flags 1, 2 and 8). Pushed onto the
+/// alternate screen's own stack, then popped.
+const RELEASES_ON: &[u8] = b"\x1b[>11u";
+const RELEASES_OFF: &[u8] = b"\x1b[<u";
 /// How long a terminal has to say whether it shows pictures.
 const PROBE_WAIT: Duration = Duration::from_secs(2);
 /// A cell's size in pixels, when the terminal doesn't say: only its shape
@@ -106,6 +111,7 @@ struct Probe {
     version: Option<String>,
     kitty: bool,
     cell: Option<(u16, u16)>,
+    keyboard: bool,
     timer: Option<SpawnHandle>,
 }
 
@@ -371,6 +377,8 @@ pub struct SessionActor {
     graphics: Option<Graphics>,
     /// Whether the terminal reports the mouse now.
     mouse: bool,
+    /// Whether the terminal says when keys are let go now.
+    releases: bool,
     /// Both exist from when the game screen opens.
     terminal: Option<Terminal<SshBackend>>,
     app: Option<App>,
@@ -477,6 +485,7 @@ impl SessionActor {
             probe: None,
             graphics: None,
             mouse: false,
+            releases: false,
             parser: KeyParser::default(),
             keys: Budget::new(KEY_BURST, KEYS_PER_SEC, now),
             actions: Budget::new(ACTION_BURST, ACTIONS_PER_SEC, now),
@@ -672,12 +681,14 @@ impl SessionActor {
             Answer::Version(version) => probe.version = Some(version),
             Answer::Kitty(ok) => probe.kitty = ok,
             Answer::CellSize(w, h) => probe.cell = Some((w, h)),
+            Answer::KeyboardProtocol => probe.keyboard = true,
             Answer::Attributes => self.probed(ctx),
         }
     }
 
-    /// The terminal has said what it will: pictures go its way from now,
-    /// if it shows them.
+    /// The terminal has said what it will: pictures go its way from now, if
+    /// it shows them, and it can say when keys are let go, if it speaks the
+    /// protocol for it.
     fn probed(&mut self, ctx: &mut Context<Self>) {
         let Some(probe) = self.probe.take() else {
             return;
@@ -686,6 +697,12 @@ impl SessionActor {
             ctx.cancel_future(timer);
         }
         self.parser.expect_answers(false);
+        if probe.keyboard
+            && let Some(app) = self.app.as_mut()
+        {
+            debug!(peer = %self.peer, version = ?probe.version, "says when keys are let go");
+            app.hear_key_releases();
+        }
         let Some(protocol) = Protocol::of(probe.version.as_deref(), probe.kitty) else {
             debug!(peer = %self.peer, version = ?probe.version, "no pictures");
             return;
@@ -1365,6 +1382,11 @@ impl SessionActor {
             self.mouse = mouse;
             bytes.extend_from_slice(if mouse { MOUSE_ON } else { MOUSE_OFF });
         }
+        let releases = app.wants_key_releases();
+        if releases != self.releases {
+            self.releases = releases;
+            bytes.extend_from_slice(if releases { RELEASES_ON } else { RELEASES_OFF });
+        }
         if !bytes.is_empty() && out.try_send(Out::Data(bytes.into())).is_ok() {
             self.unwritten.fetch_add(1, Ordering::Relaxed);
         }
@@ -1444,6 +1466,9 @@ impl SessionActor {
         if self.app.is_some() {
             if let Some(graphics) = &self.graphics {
                 self.send(Out::Data(Bytes::from_static(graphics.leave())));
+            }
+            if self.releases {
+                self.send(Out::Data(Bytes::from_static(RELEASES_OFF)));
             }
             self.send(Out::Data(Bytes::from_static(LEAVE_SCREEN)));
         }

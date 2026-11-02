@@ -26,6 +26,9 @@ pub enum Answer {
     Kitty(bool),
     /// A cell's size in pixels, width then height.
     CellSize(u16, u16),
+    /// It speaks the kitty keyboard protocol, so it can say when a key is
+    /// let go.
+    KeyboardProtocol,
     /// Its device attributes (DA1). Every terminal answers, in order, so
     /// this comes after the answers to whatever was asked before it.
     Attributes,
@@ -160,6 +163,65 @@ fn mouse(params: &[u8], fin: u8) -> Option<Key> {
     }))
 }
 
+/// Modifier bits in the kitty keyboard protocol, which sends them plus one.
+const SHIFT: u16 = 1;
+const CTRL: u16 = 4;
+/// Caps Lock and Num Lock, which don't change what a key does here.
+const LOCKS: u16 = 64 | 128;
+
+/// A key in the kitty keyboard protocol: `code[:shifted][;mods[:event]]`
+/// then `u`, or `1;mods[:event]` then an arrow's letter. Presses are keys
+/// as ever, a character's release is [`Key::Released`], and repeats and
+/// other releases mean nothing here.
+fn kitty(params: &[u8], fin: u8) -> Option<Key> {
+    let text = std::str::from_utf8(params).ok()?;
+    // Any text after a third `;` isn't needed: the code says the key.
+    let mut fields = text.split(';');
+    let code = fields.next()?;
+    let mods = fields.next().unwrap_or("");
+    let (mods, event) = mods.split_once(':').unwrap_or((mods, ""));
+    let field = |f: &str| {
+        if f.is_empty() {
+            Some(1)
+        } else {
+            f.parse::<u16>().ok()
+        }
+    };
+    let mods = field(mods)?.checked_sub(1)? & !LOCKS;
+    let key = if fin == b'u' {
+        let (code, shifted) = code.split_once(':').unwrap_or((code, ""));
+        let code = code.parse::<u32>().ok()?;
+        match (code, mods) {
+            (13, 0 | SHIFT) => Key::Enter,
+            (27, 0) => Key::Esc,
+            (127, 0) => Key::Backspace,
+            (99, CTRL) => Key::CtrlC,
+            (0x20..=0x7e, 0) => Key::Char(char::from_u32(code)?),
+            (0x20..=0x7e, SHIFT) => match shifted.parse::<u32>() {
+                Ok(shifted @ 0x20..=0x7e) => Key::Char(char::from_u32(shifted)?),
+                _ if char::from_u32(code)?.is_ascii_lowercase() => {
+                    Key::Char(char::from_u32(code)?.to_ascii_uppercase())
+                }
+                _ => return None,
+            },
+            _ => return None,
+        }
+    } else {
+        match (code, mods, fin) {
+            ("1", 0, b'A') => Key::Up,
+            ("1", 0, b'B') => Key::Down,
+            ("1", 0, b'C') => Key::Right,
+            ("1", 0, b'D') => Key::Left,
+            _ => return None,
+        }
+    };
+    match (field(event)?, key) {
+        (1, key) => Some(key),
+        (3, Key::Char(c)) => Some(Key::Released(c)),
+        _ => None,
+    }
+}
+
 /// An answer that came as a string: XTVERSION's in DCS (`>|` then the
 /// name), or Kitty's in APC (`G`, its keys, then `;OK` or why not).
 fn string_answer(intro: u8, body: &[u8]) -> Option<Answer> {
@@ -192,8 +254,8 @@ fn parse_escape(buf: &[u8], strings: bool) -> Escape {
     };
     match buf.get(1) {
         None => Escape::Incomplete,
-        // CSI: ESC [ <parameters> <final byte>. Arrows with modifiers (they
-        // have parameters) are ignored, like other Ctrl/Alt combinations.
+        // CSI: ESC [ <parameters> <final byte>. Arrows with modifiers are
+        // ignored, like other Ctrl/Alt combinations.
         Some(b'[') => match buf[2..].iter().position(|b| (0x40..=0x7e).contains(b)) {
             Some(end) => {
                 let fin = buf[2 + end];
@@ -207,6 +269,10 @@ fn parse_escape(buf: &[u8], strings: bool) -> Escape {
                 match (params.first(), fin) {
                     (Some(b'<'), b'M' | b'm') => return Escape::Key(mouse(&params[1..], fin), len),
                     (Some(b'?'), b'c') => return Escape::Answer(Answer::Attributes, len),
+                    (Some(b'?'), b'u') => return Escape::Answer(Answer::KeyboardProtocol, len),
+                    (_, b'u' | b'A'..=b'D') if end > 0 => {
+                        return Escape::Key(kitty(params, fin), len);
+                    }
                     (Some(b'6'), b't') => {
                         let text = std::str::from_utf8(params).unwrap_or("");
                         let sizes: Vec<u16> =
@@ -476,6 +542,47 @@ mod tests {
             parse(&[b"\x1b[<0;0;3M\x1b[<0;2M"]),
             [],
             "nonsense is dropped"
+        );
+    }
+
+    #[test]
+    fn kitty_keys_say_when_a_character_is_let_go() {
+        // f pressed, repeated and let go; Shift+F let go; Shift with a and
+        // with / (said shifted, then not); w, Enter, Esc, Backspace, and
+        // Ctrl+C with Num Lock on.
+        let keys: &[u8] = b"\x1b[102u\x1b[102;1:2u\x1b[102;1:3u\x1b[102;2:3u\x1b[97;2u\
+            \x1b[47:63;2u\x1b[47;2u\x1b[119u\x1b[13u\x1b[27u\x1b[127u\x1b[99;133u";
+        // An arrow pressed both ways, repeated and let go; Ctrl+Up; Shift
+        // alone; Alt+q; Enter let go.
+        let others: &[u8] = b"\x1b[A\x1b[1;1:1B\x1b[1;1:2A\x1b[1;1:3A\x1b[1;5A\x1b[57441;2u\
+            \x1b[113;3u\x1b[13;1:3u";
+        let input = [keys, others].concat();
+        let whole = parse(&[&input]);
+        assert_eq!(
+            whole,
+            [
+                Char('f'),
+                Released('f'),
+                Released('F'),
+                Char('A'),
+                Char('?'),
+                Char('w'),
+                Enter,
+                Esc,
+                Backspace,
+                CtrlC,
+                Up,
+                Down,
+            ]
+        );
+        for at in 0..=input.len() {
+            assert_eq!(parse(&[&input[..at], &input[at..]]), whole, "split at {at}");
+        }
+        // Asked whether it speaks the protocol, a terminal says which of
+        // its flags are on.
+        assert_eq!(
+            answered(&[b"\x1b[?0u\x1b[?62c"]),
+            (vec![], vec![Answer::KeyboardProtocol, Answer::Attributes])
         );
     }
 

@@ -122,6 +122,27 @@ gives no speed boost.
   long you have to fire, and how fast bullets fly. Bots go for guns too,
   and fire when a snake is in their line. In single player, guns come with
   at least one bot to shoot.
+- **Grenades, flashbangs and smoke.** With guns on, a thrown item appears
+  every 15 seconds as well, and stays 8 seconds. You hold one item at a
+  time, gun or thrown, and taking another swaps it. To throw, hold `f`: a
+  mark `◎` sets off from your head the way you're going, 2 cells a tick,
+  over walls and snakes, and everyone sees it. Let go and the item lands on
+  the mark on the next tick. If the mark goes past the board's edge first,
+  the throw is wasted. Where the terminal can't tell when a key is let go,
+  press `f` once to send the mark and again to throw (see Controls).
+  - the **grenade** `⊕` blasts the cells within 2 of where it lands; each
+    counts as hit by a shot, for every snake but yours;
+  - the **flashbang** `✦` blinds every other snake for 3 seconds: their
+    board turns white, while you and anyone watching see as usual. Blinded
+    bots follow a few moves they'd planned, then go straight;
+  - **smoke** `≋` covers the cells within 3 for 8 seconds, hiding what's
+    under it from everyone, bots too. Snakes move and get hit under it as
+    usual.
+
+  A room's host sets how often thrown items come, how long they stay, the
+  blast's and the smoke's radius, and how long flashbangs and smoke last.
+  Bots take thrown items too, and throw them as people do, letting go when
+  the mark gets where they want it.
 - **Winning.** The last snake alive wins. If all the snakes still in play
   crash on the same tick, it's a draw. After 3 minutes, the longest snake
   still alive wins.
@@ -401,7 +422,7 @@ you make the window bigger again and resume.
 | --- | --- |
 | `↑ ↓ ← →` / `WASD` | Move; in the settings menu, select (`↑ ↓`) and change a value (`← →`). The menu also takes `hjkl` |
 | `Enter` | Start game / confirm |
-| `f` | Fire the gun you hold, against bots or in a room |
+| `f` | Fire the gun you hold, against bots or in a room. With a grenade, flashbang or smoke: hold to aim, let go to throw; or press, then press again to throw |
 | `Esc` / `p` | Pause (resume or quit to menu) |
 | `r` `r` | Reset all settings to defaults (in the menu; press `r` twice) |
 | `r` | Play again with the same settings (after game over) |
@@ -409,6 +430,11 @@ you make the window bigger again and resume.
 | `Ctrl+C` | Quit right away, from any screen |
 
 Letter keys work the same with Shift or Caps Lock on.
+
+Holding `f` to throw needs a terminal that says when a key is let go, by the
+kitty keyboard protocol, such as kitty, WezTerm, Ghostty, foot or Alacritty.
+The server asks each terminal, and turns the protocol on only while you play a
+round with guns. Elsewhere, and through tmux, press `f` again to throw.
 
 ### Config options
 
@@ -426,9 +452,9 @@ Letter keys work the same with Shift or Caps Lock on.
 | super food growth | Length gained from super food |
 | super food speed boost | Duration of the 2× speed boost (`off` disables) |
 | bots | Bots playing against you in single player (`none` for a game alone) |
-| guns | Guns, against bots and in rooms you make; with how often one spawns, its lifetime, the time to fire one, and the bullet speed |
-| food / super food / poison / laser / pistol icon | Glyph drawn on the board (dot, star, heart, cross, zigzag, gun, …) |
-| colors | Per-cell-type colors (head, body, food, super food, poison, walls, background, laser, pistol) |
+| guns | Guns, against bots and in rooms you make; with how often one spawns, its lifetime, the time to use one, and the bullet speed; and for thrown items, how often one spawns, its lifetime, the grenade's blast radius, how long a flashbang lasts, and the smoke's radius and how long it lasts |
+| food / super food / poison / laser / pistol / grenade / flashbang / smoke icon | Glyph drawn on the board (dot, star, heart, cross, zigzag, gun, circled plus, …) |
+| colors | Per-cell-type colors (head, body, food, super food, poison, walls, background, laser, pistol, grenade, flashbang, smoke) |
 
 The board's frame shows your current length, the record for the active
 configuration, and the elapsed play time in its heading.

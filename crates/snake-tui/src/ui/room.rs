@@ -13,11 +13,10 @@ use shell_tui::online::InRoom;
 use shell_tui::ui::{dialog, dim, ping_style, ping_text, secs};
 use snake_core::config::{ColorSlot, Theme};
 use snake_core::geom::Point;
-use snake_core::guns::GunKind;
 use snake_core::round::{PhaseView, RoomView};
-use snake_core::view::MatchView;
+use snake_core::view::{MatchView, SnakeView};
 
-use super::board::{BoardWidget, SnakeLook, gun_look};
+use super::board::{BoardWidget, SnakeLook, item_look, snake_hints};
 use crate::app::{SnakeUi, racer, snake_view};
 use crate::palette::{opponent_colors, theme_color};
 
@@ -35,11 +34,13 @@ pub fn room_fits(width: u16, height: u16, size: Size) -> bool {
     size.width >= w && size.height >= h
 }
 
-pub(crate) fn draw_round(frame: &mut Frame, app: &SnakeUi, room: &InRoom) {
+/// Draws the round. `releases` says whether the player's terminal says
+/// when keys are let go.
+pub(crate) fn draw_round(frame: &mut Frame, app: &SnakeUi, room: &InRoom, releases: bool) {
     if let Some(view) = snake_view(room)
         && let Some(board) = &view.game.board
     {
-        draw_match(frame, app, room, view, board);
+        draw_match(frame, app, room, view, board, releases);
     }
 }
 
@@ -101,7 +102,14 @@ fn origin(center: Point, board: &MatchView, visible: (u16, u16)) -> Point {
     }
 }
 
-fn draw_match(frame: &mut Frame, app: &SnakeUi, room: &InRoom, view: &RoomView, board: &MatchView) {
+fn draw_match(
+    frame: &mut Frame,
+    app: &SnakeUi,
+    room: &InRoom,
+    view: &RoomView,
+    board: &MatchView,
+    releases: bool,
+) {
     let area = frame.area();
     let full_w = board.width * 2 + 2;
     let full_h = board.height + 2;
@@ -145,6 +153,11 @@ fn draw_match(frame: &mut Frame, app: &SnakeUi, room: &InRoom, view: &RoomView, 
     frame.render_widget(block, board_rect);
 
     let looks = looks(app, room, board);
+    // The player's own snake, while it plays.
+    let mine = room
+        .my_seat()
+        .and_then(|s| s.slot)
+        .and_then(|slot| board.snakes.iter().find(|s| s.id == slot));
     let me = room
         .followed()
         .and_then(|s| s.slot)
@@ -159,28 +172,24 @@ fn draw_match(frame: &mut Frame, app: &SnakeUi, room: &InRoom, view: &RoomView, 
         theme: &app.cfg.theme,
         origin: origin(center, board, (inner.width / 2, inner.height)),
         looks: Some(&looks),
+        blind: mine.is_some_and(|s| s.blind.is_some()),
     };
     frame.render_widget(widget, inner);
 
     if score_w > 0 {
         draw_scores(frame, room, view, board, &app.cfg.theme, &looks, score_rect);
     }
-    let (need_w, need_h) = room_size(board.width, board.height);
+    // The size that would show the board whole, if this one doesn't.
+    let needs = cropped.then(|| room_size(board.width, board.height));
     let playing = app.in_play(room);
-    let held = room
-        .my_seat()
-        .and_then(|s| s.slot)
-        .and_then(|slot| board.snakes.iter().find(|s| s.id == slot))
-        .and_then(|s| s.gun);
     frame.render_widget(
         Paragraph::new(status_line(
             room,
             playing,
-            held,
+            mine,
             &app.cfg.theme,
-            cropped,
-            need_w,
-            need_h,
+            releases,
+            needs,
         ))
         .alignment(Alignment::Center),
         status,
@@ -220,8 +229,8 @@ fn draw_scores(
     seats.sort_by_key(|&(s, alive, length)| std::cmp::Reverse((s.slot.is_some(), alive, length)));
     let gun = |slot: Option<u8>| {
         let slot = slot?;
-        let (kind, _) = board.snakes.iter().find(|s| s.id == slot)?.gun?;
-        Some(gun_look(theme, kind))
+        let (kind, _) = board.snakes.iter().find(|s| s.id == slot)?.held?;
+        Some(item_look(theme, kind))
     };
     let followed = room.followed().map(|s| s.who.id);
     // Round trips go last, as numbers if names keep 8 columns, or else as
@@ -296,11 +305,10 @@ fn draw_scores(
 fn status_line(
     room: &InRoom,
     playing: bool,
-    held: Option<(GunKind, Duration)>,
+    mine: Option<&SnakeView>,
     theme: &Theme,
-    cropped: bool,
-    need_w: u16,
-    need_h: u16,
+    releases: bool,
+    needs: Option<(u16, u16)>,
 ) -> Line<'static> {
     let warn = Style::default()
         .fg(Color::Yellow)
@@ -308,7 +316,7 @@ fn status_line(
     if room.confirm_leave {
         return Line::styled("Leave the match? y leave · n stay", warn);
     }
-    if cropped {
+    if let Some((need_w, need_h)) = needs {
         return Line::styled(
             format!("Terminal too small: showing part of the board (needs {need_w}×{need_h})"),
             Style::default().fg(Color::LightRed),
@@ -326,20 +334,14 @@ fn status_line(
         PhaseView::Running { .. } if !playing => {
             Line::styled("You're out · watching the rest · Esc leave", dim())
         }
-        PhaseView::Running { .. } => match held {
-            Some((kind, left)) => {
-                let (icon, color) = gun_look(theme, kind);
-                let bold = Style::default().fg(color).add_modifier(Modifier::BOLD);
-                Line::from(vec![
-                    Span::styled(
-                        format!("{icon} {} · f fire · {} s", kind.name(), secs(left).max(1)),
-                        bold,
-                    ),
-                    Span::styled(" · ←↑↓→ move · Esc leave", dim()),
-                ])
+        PhaseView::Running { .. } => {
+            let mut spans = mine.map_or_else(Vec::new, |s| snake_hints(theme, s, releases));
+            if !spans.is_empty() {
+                spans.push(Span::styled(" · ", dim()));
             }
-            None => Line::styled("←↑↓→ move · Esc leave", dim()),
-        },
+            spans.push(Span::styled("←↑↓→ move · Esc leave", dim()));
+            Line::from(spans)
+        }
         _ => Line::default(),
     }
 }

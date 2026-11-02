@@ -11,7 +11,9 @@ use rand::{RngExt, SeedableRng};
 use crate::board;
 use crate::config::Rules;
 use crate::geom::{Direction, Point, wrap_next};
-use crate::guns::{BEAM_SHOWN, Beam, Bullet, Gun, GunKind, Held, Hit, next_cell};
+use crate::guns::{
+    BEAM_SHOWN, Beam, Bullet, Cloud, Held, Hit, Item, MARK_SPEED, Pickup, Throw, disc, next_cell,
+};
 use crate::snake::{DeathCause, Snake};
 use crate::spawn;
 use crate::view::{MatchView, SnakeView};
@@ -69,6 +71,7 @@ struct Move {
     death: Option<DeathCause>,
 }
 
+#[derive(Clone)]
 pub struct World {
     pub rules: Rules,
     pub width: u16,
@@ -76,15 +79,20 @@ pub struct World {
     walls: Arc<[bool]>,
     pub snakes: Vec<Snake>,
     pub foods: Vec<Food>,
-    pub guns: Vec<Gun>,
+    pub items: Vec<Pickup>,
     pub bullets: Vec<Bullet>,
     pub beams: Vec<Beam>,
+    /// Grenades' blasts and flashbangs' flashes, kept a moment to be seen.
+    pub bursts: Vec<(Item, Cloud)>,
+    pub smoke: Vec<Cloud>,
     /// Game time. It only moves through [`Self::advance_clock`], so a world
     /// driven by fixed ticks replays exactly from its seed and inputs.
     pub clock: Duration,
     next_spawn: [Option<Duration>; FoodKind::ALL.len()],
-    /// When the next gun appears; never in single player.
+    /// When the next gun appears; never in a game alone.
     next_gun: Option<Duration>,
+    /// When the next thrown item does.
+    next_thrown: Option<Duration>,
     free_cells: usize,
     /// Whether dead snakes turn into food. Otherwise they stay where they
     /// died, as the single-player game-over screen shows.
@@ -123,10 +131,12 @@ impl World {
         let mut world = Self::new(rules, walls, snakes, rng);
         world.corpses_to_food = true;
         world.scale_food = true;
-        world.next_gun = world
-            .rules
+        let rules = &world.rules;
+        world.next_gun = rules
             .guns
-            .then(|| Duration::from_secs(world.rules.gun_interval_s));
+            .then(|| Duration::from_secs(rules.gun_interval_s));
+        world.next_thrown = (rules.guns && rules.thrown_interval_s > 0)
+            .then(|| Duration::from_secs(rules.thrown_interval_s));
         Ok(world)
     }
 
@@ -149,12 +159,15 @@ impl World {
             rules,
             snakes,
             foods: Vec::new(),
-            guns: Vec::new(),
+            items: Vec::new(),
             bullets: Vec::new(),
             beams: Vec::new(),
+            bursts: Vec::new(),
+            smoke: Vec::new(),
             clock: Duration::ZERO,
             next_spawn,
             next_gun: None,
+            next_thrown: None,
             free_cells,
             corpses_to_food: false,
             keeps_body: None,
@@ -186,18 +199,52 @@ impl World {
             .is_some_and(|s| s.enqueue(dir, w, h))
     }
 
-    /// Asks snake `id` to fire its gun on the next step. Returns whether it
-    /// will: it must be alive and holding one.
+    /// Snake `id`'s `f`: it fires the gun it holds on the next step, or
+    /// starts throwing the thrown item it holds, or, already throwing,
+    /// throws it where the mark is, as letting go of `f` does. Returns
+    /// whether it did any of these.
     pub fn fire(&mut self, id: u8) -> bool {
-        let Some(snake) = self
-            .snakes
-            .iter_mut()
-            .find(|s| s.id == id && s.alive() && s.gun.is_some())
-        else {
+        let Some(snake) = self.snakes.iter_mut().find(|s| s.id == id && s.alive()) else {
             return false;
         };
-        snake.firing = true;
+        if let Some(throw) = snake.throw.as_mut()
+            && !throw.released
+        {
+            throw.released = true;
+            return true;
+        }
+        match snake.held {
+            Some(held) if held.kind.thrown() => {
+                snake.held = None;
+                snake.throw = Some(Throw {
+                    kind: held.kind,
+                    dir: snake.dir,
+                    mark: None,
+                    travelled: 0,
+                    released: false,
+                });
+            }
+            Some(_) => snake.firing = true,
+            None => return false,
+        }
         true
+    }
+
+    /// Snake `id` let go of `f`: a throw on its way lands where its mark
+    /// is, on the next step. Returns whether there was one.
+    pub fn release(&mut self, id: u8) -> bool {
+        let throw = self
+            .snakes
+            .iter_mut()
+            .find(|s| s.id == id && s.alive())
+            .and_then(|s| s.throw.as_mut());
+        match throw {
+            Some(throw) if !throw.released => {
+                throw.released = true;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Moves game time forward: food and guns that have run out disappear,
@@ -207,11 +254,13 @@ impl World {
         let clock = self.clock;
         self.foods
             .retain(|f| f.expires_at.is_none_or(|e| e > clock));
-        self.guns.retain(|g| g.expires_at > clock);
+        self.items.retain(|g| g.expires_at > clock);
         self.beams.retain(|b| b.until > clock);
+        self.bursts.retain(|(_, b)| b.until > clock);
+        self.smoke.retain(|c| c.until > clock);
         for snake in &mut self.snakes {
-            if snake.gun.is_some_and(|g| g.until <= clock) {
-                snake.gun = None;
+            if snake.held.is_some_and(|g| g.until <= clock) {
+                snake.held = None;
                 snake.firing = false;
             }
         }
@@ -219,8 +268,15 @@ impl World {
             if clock < t {
                 break;
             }
-            self.spawn_gun();
+            self.spawn_item(&Item::GUNS, self.rules.gun_ttl_s);
             self.next_gun = Some(t + Duration::from_secs(self.rules.gun_interval_s));
+        }
+        while let Some(t) = self.next_thrown {
+            if clock < t {
+                break;
+            }
+            self.spawn_item(&Item::THROWN, self.rules.thrown_ttl_s);
+            self.next_thrown = Some(t + Duration::from_secs(self.rules.thrown_interval_s));
         }
 
         let alive = self.snakes.iter().filter(|s| s.alive()).count();
@@ -384,14 +440,14 @@ impl World {
         out
     }
 
-    /// The guns' part of a step, once every snake has moved:
+    /// The items' part of a step, once every snake has moved:
     /// - bullets in flight go on, then the shots asked for fire, from the
-    ///   heads where they now are;
-    /// - every hit lands at once: a snake hit in the head dies, and one hit
-    ///   in the body loses everything behind the hit nearest its head, the
-    ///   piece turning into food;
-    /// - last, the heads left take any gun they're on, in place of one they
-    ///   hold.
+    ///   heads where they now are, and throws move or land;
+    /// - every hit lands at once, from shots and blasts: a snake hit in the
+    ///   head dies, and one hit in the body loses everything behind the hit
+    ///   nearest its head, the piece turning into food;
+    /// - last, the heads left take any item they're on, in place of one
+    ///   they hold.
     fn shoot(&mut self, out: &mut StepOutcome) {
         // (shooter, target snake's place in `snakes`, cell of its body hit)
         let mut hits: Vec<(u8, usize, usize)> = Vec::new();
@@ -405,12 +461,12 @@ impl World {
             if !firing || !snake.alive() {
                 continue;
             }
-            let Some(gun) = snake.gun.take() else {
+            let Some(gun) = snake.held.take() else {
                 continue;
             };
             let (owner, pos, dir) = (snake.id, snake.head(), snake.dir);
             match gun.kind {
-                GunKind::Laser => {
+                Item::Laser => {
                     let cells = self.line_of_fire(pos, dir, usize::MAX);
                     for &p in &cells {
                         hits.extend(self.struck(p, owner).map(|(t, at)| (owner, t, at)));
@@ -421,9 +477,12 @@ impl World {
                         until: self.clock + BEAM_SHOWN,
                     });
                 }
-                GunKind::Pistol => self.fly(Bullet { owner, pos, dir }, false, &mut hits),
+                Item::Pistol => self.fly(Bullet { owner, pos, dir }, false, &mut hits),
+                // Thrown, never fired: see `Self::fire`.
+                Item::Grenade | Item::Flashbang | Item::Smoke => {}
             }
         }
+        self.throws(&mut hits);
 
         let mut order: Vec<usize> = hits.iter().map(|h| h.1).collect();
         order.sort_unstable();
@@ -442,7 +501,7 @@ impl World {
             });
             if keep == 0 {
                 snake.death = Some(DeathCause::Shot);
-                snake.gun = None;
+                snake.held = None;
                 out.deaths.push((snake.id, DeathCause::Shot));
                 if self.corpses_to_food {
                     self.turn_into_food(target);
@@ -457,14 +516,95 @@ impl World {
 
         let hold = Duration::from_secs(self.rules.gun_hold_s);
         for snake in self.snakes.iter_mut().filter(|s| s.alive()) {
-            if let Some(i) = self.guns.iter().position(|g| g.pos == snake.head()) {
-                let gun = self.guns.remove(i);
-                snake.gun = Some(Held {
+            if let Some(i) = self.items.iter().position(|g| g.pos == snake.head()) {
+                let gun = self.items.remove(i);
+                snake.held = Some(Held {
                     kind: gun.kind,
                     until: self.clock + hold,
                 });
             }
         }
+    }
+
+    /// Throws on their way: one let go lands where its mark is; the rest
+    /// move their marks on, and one whose mark would go past the board's
+    /// edge is lost. A mark sets off from the head, the step after its
+    /// throw started. Landing blasts go in `hits`, to land with the shots.
+    fn throws(&mut self, hits: &mut Vec<(u8, usize, usize)>) {
+        let (w, h) = (self.width, self.height);
+        for i in 0..self.snakes.len() {
+            let Some(mut throw) = self.snakes[i].throw.take() else {
+                continue;
+            };
+            let snake = &self.snakes[i];
+            if !snake.alive() {
+                continue;
+            }
+            let (owner, head) = (snake.id, snake.head());
+            match throw.mark {
+                Some(mark) if throw.released => self.land(owner, throw.kind, mark, hits),
+                None if throw.released => self.land(owner, throw.kind, head, hits),
+                None => {
+                    throw.mark = Some(head);
+                    self.snakes[i].throw = Some(throw);
+                }
+                Some(mark) => {
+                    let mut next = Some(mark);
+                    for _ in 0..MARK_SPEED {
+                        next = next.and_then(|p| next_cell(p, throw.dir, w, h));
+                    }
+                    if next.is_some() {
+                        throw.mark = next;
+                        throw.travelled += MARK_SPEED;
+                        self.snakes[i].throw = Some(throw);
+                    }
+                }
+            }
+        }
+    }
+
+    /// A thrown item of `owner`'s, landing at `at`.
+    fn land(&mut self, owner: u8, kind: Item, at: Point, hits: &mut Vec<(u8, usize, usize)>) {
+        let (w, h, until) = (self.width, self.height, self.clock + BEAM_SHOWN);
+        match kind {
+            Item::Grenade => {
+                let cells = disc(at, self.rules.grenade_radius, w, h);
+                for &p in &cells {
+                    hits.extend(self.struck(p, owner).map(|(t, at)| (owner, t, at)));
+                }
+                self.bursts.push((kind, Cloud { cells, until }));
+            }
+            Item::Flashbang => {
+                let blind_until = self.clock + Duration::from_secs(self.rules.flash_s);
+                for snake in self
+                    .snakes
+                    .iter_mut()
+                    .filter(|s| s.alive() && s.id != owner)
+                {
+                    snake.blind_until = blind_until;
+                    snake.plan = None;
+                }
+                let cells = disc(at, 1, w, h);
+                self.bursts.push((kind, Cloud { cells, until }));
+            }
+            Item::Smoke => {
+                let cells = disc(at, self.rules.smoke_radius, w, h);
+                let until = self.clock + Duration::from_secs(self.rules.smoke_s);
+                self.smoke.push(Cloud { cells, until });
+            }
+            // Fired, never thrown.
+            Item::Laser | Item::Pistol => {}
+        }
+    }
+
+    /// A number from the world's own random numbers, so a seed replays.
+    pub(crate) fn roll(&mut self, range: std::ops::RangeInclusive<usize>) -> usize {
+        self.rng.random_range(range)
+    }
+
+    /// Whether smoke hides the cell at `p`.
+    pub fn smoky(&self, p: Point) -> bool {
+        self.smoke.iter().any(|c| c.cells.contains(&p))
     }
 
     /// Moves a bullet up to the rules' bullet speed in cells, checking first the cell
@@ -533,7 +673,7 @@ impl World {
         for p in cells {
             let taken = self.walls[self.idx(p)]
                 || self.foods.iter().any(|f| f.pos == p)
-                || self.guns.iter().any(|g| g.pos == p)
+                || self.items.iter().any(|g| g.pos == p)
                 || self.snakes.iter().any(|s| s.alive() && s.body.contains(&p));
             if !taken {
                 self.place_food(p, FoodKind::Normal);
@@ -551,7 +691,7 @@ impl World {
             .foods
             .iter()
             .map(|f| f.pos)
-            .chain(self.guns.iter().map(|g| g.pos))
+            .chain(self.items.iter().map(|g| g.pos))
         {
             taken[self.idx(p)] = true;
         }
@@ -575,15 +715,16 @@ impl World {
         }
     }
 
-    fn spawn_gun(&mut self) {
+    /// One of `kinds` at random, on a free cell, for `ttl_s` seconds.
+    fn spawn_item(&mut self, kinds: &[Item], ttl_s: u64) {
         let Some(pos) = self.free_cell() else {
             return;
         };
-        let kind = GunKind::ALL[self.rng.random_range(0..GunKind::ALL.len())];
-        self.guns.push(Gun {
+        let kind = kinds[self.rng.random_range(0..kinds.len())];
+        self.items.push(Pickup {
             pos,
             kind,
-            expires_at: self.clock + Duration::from_secs(self.rules.gun_ttl_s),
+            expires_at: self.clock + Duration::from_secs(ttl_s),
         });
     }
 
@@ -609,20 +750,50 @@ impl World {
                     id: s.id,
                     body: s.body.iter().copied().collect(),
                     alive: s.alive(),
-                    gun: s
-                        .gun
+                    held: s
+                        .held
                         .filter(|_| s.alive())
                         .map(|g| (g.kind, g.until.saturating_sub(self.clock))),
+                    throwing: s
+                        .throw
+                        .as_ref()
+                        .filter(|t| s.alive() && !t.released)
+                        .map(|t| t.kind),
+                    blind: (s.alive() && s.blind(self.clock)).then(|| s.blind_until - self.clock),
                 })
                 .collect(),
             foods: self.foods.iter().map(|f| (f.pos, f.kind)).collect(),
-            guns: self.guns.iter().map(|g| (g.pos, g.kind)).collect(),
+            items: self.items.iter().map(|g| (g.pos, g.kind)).collect(),
             bullets: self.bullets.iter().map(|b| (b.pos, b.dir)).collect(),
             beams: self
                 .beams
                 .iter()
                 .map(|b| (b.dir, b.cells.clone()))
                 .collect(),
+            marks: self
+                .snakes
+                .iter()
+                .filter(|s| s.alive())
+                .filter_map(|s| {
+                    let throw = s.throw.as_ref()?;
+                    Some((throw.mark?, throw.kind))
+                })
+                .collect(),
+            bursts: self
+                .bursts
+                .iter()
+                .map(|(kind, b)| (*kind, b.cells.clone()))
+                .collect(),
+            smoke: {
+                let mut cells: Vec<Point> = self
+                    .smoke
+                    .iter()
+                    .flat_map(|c| c.cells.iter().copied())
+                    .collect();
+                cells.sort_by_key(|p| (p.y, p.x));
+                cells.dedup();
+                cells
+            },
             clock: self.clock,
         }
     }
@@ -637,7 +808,7 @@ mod tests {
     use super::*;
     use crate::config::{GrowthMode, InnerWalls, WallMode};
     use crate::geom::Direction::{self, Down, Left, Right, Up};
-    use crate::guns::{Bullet, Gun};
+    use crate::guns::{Bullet, Pickup};
 
     fn rules(wall_mode: WallMode) -> Rules {
         Rules {
@@ -924,8 +1095,8 @@ mod tests {
     }
 
     /// Snake `id` takes a gun of `kind` and fires it on the next step.
-    fn fire(world: &mut World, id: u8, kind: GunKind) {
-        world.snakes[id as usize].gun = Some(Held {
+    fn fire(world: &mut World, id: u8, kind: Item) {
+        world.snakes[id as usize].held = Some(Held {
             kind,
             until: world.clock + Duration::from_secs(5),
         });
@@ -953,7 +1124,7 @@ mod tests {
     }
 
     use DeathCause::Shot;
-    use GunKind::{Laser, Pistol};
+    use Item::{Flashbang, Grenade, Laser, Pistol, Smoke};
 
     #[test]
     fn a_laser_cuts_every_snake_in_its_line_up_to_a_wall() {
@@ -985,7 +1156,7 @@ mod tests {
             [(10, 5), (15, 5), (15, 6)],
             "the cut piece and the dead snake"
         );
-        assert_eq!(w.snakes[0].gun, None, "it fires once");
+        assert_eq!(w.snakes[0].held, None, "it fires once");
         let beam = &w.beams[0].cells;
         assert_eq!(
             (beam[0], beam[beam.len() - 1]),
@@ -1114,24 +1285,24 @@ mod tests {
     fn a_gun_taken_replaces_the_one_held() {
         let mut w = armed(WallMode::Full, &[(&[(5, 5), (4, 5)], Right)]);
         assert!(!w.fire(0), "nothing to fire");
-        w.snakes[0].gun = Some(Held {
+        w.snakes[0].held = Some(Held {
             kind: Laser,
             until: Duration::from_secs(1),
         });
-        w.guns.push(Gun {
+        w.items.push(Pickup {
             pos: Point { x: 6, y: 5 },
             kind: Pistol,
             expires_at: Duration::from_secs(60),
         });
         w.step();
         assert_eq!(
-            w.snakes[0].gun,
+            w.snakes[0].held,
             Some(Held {
                 kind: Pistol,
                 until: w.clock + Duration::from_secs(w.rules.gun_hold_s),
             })
         );
-        assert!(w.guns.is_empty());
+        assert!(w.items.is_empty());
     }
 
     #[test]
@@ -1141,6 +1312,7 @@ mod tests {
             gun_interval_s: 10,
             gun_ttl_s: 8,
             gun_hold_s: 5,
+            thrown_interval_s: 0,
             ..Rules::default()
         };
         let mut w = World::with_players(rules.clone(), 3, 2).unwrap();
@@ -1148,7 +1320,7 @@ mod tests {
         let mut on_board = Vec::new();
         for _ in 0..30 {
             w.advance_clock(second);
-            on_board.push(w.guns.len());
+            on_board.push(w.items.len());
         }
         // One appears at 10 s and 20 s and 30 s, each gone 8 s later.
         let expected: Vec<usize> = (1..=30)
@@ -1156,18 +1328,141 @@ mod tests {
             .collect();
         assert_eq!(on_board, expected);
 
-        w.snakes[0].gun = Some(Held {
+        w.snakes[0].held = Some(Held {
             kind: Laser,
             until: w.clock + Duration::from_secs(5),
         });
         w.advance_clock(Duration::from_secs(4));
-        assert!(w.snakes[0].gun.is_some());
+        assert!(w.snakes[0].held.is_some());
         w.advance_clock(second);
-        assert_eq!(w.snakes[0].gun, None, "too late to fire it");
+        assert_eq!(w.snakes[0].held, None, "too late to fire it");
 
         let mut solo = World::solo(rules, 3).unwrap();
         solo.advance_clock(Duration::from_secs(60));
-        assert!(solo.guns.is_empty(), "single player has none");
+        assert!(solo.items.is_empty(), "single player has none");
+    }
+
+    #[test]
+    fn thrown_items_come_on_their_own_clock() {
+        let rules = Rules {
+            guns: true,
+            gun_interval_s: 60,
+            thrown_interval_s: 5,
+            thrown_ttl_s: 3,
+            ..Rules::default()
+        };
+        let mut w = World::with_players(rules, 3, 2).unwrap();
+        w.advance_clock(Duration::from_secs(5));
+        assert_eq!(w.items.len(), 1);
+        assert!(w.items[0].kind.thrown(), "{:?}", w.items[0].kind);
+        w.advance_clock(Duration::from_secs(3));
+        assert!(w.items.is_empty(), "gone after its lifetime");
+    }
+
+    /// Snake `id` takes a thrown item of `kind` and starts throwing it.
+    fn throw(world: &mut World, id: u8, kind: Item) {
+        world.snakes[id as usize].held = Some(Held {
+            kind,
+            until: world.clock + Duration::from_secs(5),
+        });
+        assert!(world.fire(id), "it starts");
+        assert!(world.snakes[id as usize].throw.is_some());
+        assert_eq!(
+            world.snakes[id as usize].held, None,
+            "in the hand, not held"
+        );
+    }
+
+    #[test]
+    fn a_throws_mark_crosses_the_board_and_it_lands_where_let_go() {
+        let mut w = armed(WallMode::Full, &[(&[(5, 5), (4, 5)], Right)]);
+        throw(&mut w, 0, Smoke);
+        w.step();
+        let mark = |w: &World| w.snakes[0].throw.as_ref().and_then(|t| t.mark);
+        assert_eq!(mark(&w), Some(Point { x: 6, y: 5 }), "from the head");
+        w.step();
+        assert_eq!(mark(&w), Some(Point { x: 8, y: 5 }), "two cells a step");
+        assert_eq!(
+            w.view().marks,
+            [(Point { x: 8, y: 5 }, Smoke)],
+            "everyone sees it"
+        );
+        assert!(w.release(0));
+        w.step();
+        assert!(w.snakes[0].throw.is_none());
+        assert!(w.smoky(Point { x: 8, y: 5 }) && w.smoky(Point { x: 11, y: 5 }));
+        assert!(!w.smoky(Point { x: 12, y: 5 }), "a radius of 3");
+        w.advance_clock(Duration::from_secs(w.rules.smoke_s));
+        assert!(w.smoke.is_empty(), "it clears");
+    }
+
+    #[test]
+    fn a_second_f_throws_as_letting_go_does() {
+        let mut w = armed(WallMode::Full, &[(&[(5, 5), (4, 5)], Right)]);
+        throw(&mut w, 0, Smoke);
+        w.step();
+        assert!(w.fire(0), "f again");
+        w.step();
+        assert_eq!(w.smoke.len(), 1);
+    }
+
+    #[test]
+    fn a_mark_that_passes_the_edge_loses_the_throw() {
+        let mut w = armed(WallMode::Open, &[(&[(20, 5), (19, 5)], Right)]);
+        throw(&mut w, 0, Grenade);
+        for _ in 0..8 {
+            w.step();
+        }
+        assert!(w.snakes[0].throw.is_none(), "gone past the edge");
+        assert!(
+            w.bursts.is_empty() && !w.release(0),
+            "and it never went off"
+        );
+    }
+
+    #[test]
+    fn a_grenade_blasts_everyone_near_but_its_thrower() {
+        let mut w = armed(
+            WallMode::Full,
+            &[
+                (&[(5, 5), (4, 5)], Right),
+                // Its head lands within the blast once it has moved.
+                (&[(6, 7), (7, 7), (8, 7)], Left),
+                // Only its second cell does.
+                (&[(8, 4), (8, 5), (8, 6), (8, 7)], Up),
+            ],
+        );
+        // Let go at once: it lands at the thrower's own head.
+        throw(&mut w, 0, Grenade);
+        assert!(w.release(0));
+        let out = w.step();
+        assert_eq!(out.hits, [hit(0, 1, 0), hit(0, 2, 1)]);
+        assert_eq!(out.deaths, [(1, Shot)]);
+        assert_eq!(w.snakes[0].len(), 2, "never the thrower");
+        assert_eq!(w.view().bursts.len(), 1, "the blast shows a moment");
+    }
+
+    #[test]
+    fn a_flashbang_blinds_everyone_but_its_thrower() {
+        let mut w = armed(
+            WallMode::Full,
+            &[
+                (&[(5, 5), (4, 5)], Right),
+                (&[(5, 15), (4, 15)], Right),
+                (&[(20, 10), (21, 10)], Left),
+            ],
+        );
+        throw(&mut w, 0, Flashbang);
+        w.release(0);
+        w.step();
+        let blind: Vec<bool> = w.snakes.iter().map(|s| s.blind(w.clock)).collect();
+        assert_eq!(blind, [false, true, true]);
+        assert_eq!(
+            w.view().snakes[1].blind,
+            Some(Duration::from_secs(w.rules.flash_s))
+        );
+        w.advance_clock(Duration::from_secs(w.rules.flash_s));
+        assert!(!w.snakes[1].blind(w.clock), "for a while");
     }
 
     proptest! {
@@ -1178,8 +1473,9 @@ mod tests {
             seed in any::<u64>(),
             players in 2usize..=4,
             wrap in any::<bool>(),
-            // A key's second half is a turn, or else a gun to fire at once.
-            keys in prop::collection::vec((0usize..4, 0usize..6), 0..150),
+            // A key's second half is a turn, a gun to fire at once, an item
+            // to throw, or letting go of one.
+            keys in prop::collection::vec((0usize..4, 0usize..10), 0..150),
         ) {
             let rules = Rules {
                 width: 20,
@@ -1205,11 +1501,24 @@ mod tests {
                         0..4 => {
                             s.enqueue(dirs[key], w, h);
                         }
-                        _ => {
-                            let kind = GunKind::ALL[key - 4];
-                            s.gun = Some(Held { kind, until });
+                        4..6 => {
+                            let kind = Item::GUNS[key - 4];
+                            s.held = Some(Held { kind, until });
                             s.firing = true;
                         }
+                        6..9 => {
+                            s.held = Some(Held { kind: Item::THROWN[key - 6], until });
+                        }
+                        _ => {}
+                    }
+                    match key {
+                        6..9 => {
+                            world.fire((who % players) as u8);
+                        }
+                        9 => {
+                            world.release((who % players) as u8);
+                        }
+                        _ => {}
                     }
                 }
                 world.advance_clock(Duration::from_millis(150));

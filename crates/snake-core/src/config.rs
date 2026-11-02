@@ -50,6 +50,9 @@ pub const GLYPHS: &[(&str, &str)] = &[
     ("percent", "%"),
     ("zigzag", "↯"),
     ("gun", "⌐"),
+    ("circled plus", "⊕"),
+    ("four-pointed star", "✦"),
+    ("triple tilde", "≋"),
 ];
 
 pub fn glyph_name(idx: usize) -> &'static str {
@@ -173,9 +176,14 @@ pub enum ColorSlot {
     Laser,
     /// A pistol on the board, and its bullets.
     Pistol,
+    /// A grenade on the board, and its blast.
+    Grenade,
+    Flashbang,
+    /// Smoke on the board, and its cloud.
+    Smoke,
 }
 
-pub const COLOR_SLOTS: usize = 9;
+pub const COLOR_SLOTS: usize = 12;
 
 #[derive(Clone, Copy)]
 pub enum IconSlot {
@@ -184,9 +192,12 @@ pub enum IconSlot {
     Poison,
     Laser,
     Pistol,
+    Grenade,
+    Flashbang,
+    Smoke,
 }
 
-pub const ICON_SLOTS: usize = 5;
+pub const ICON_SLOTS: usize = 8;
 
 impl IconSlot {
     /// The color slot this icon is drawn with, used for menu previews.
@@ -197,6 +208,9 @@ impl IconSlot {
             IconSlot::Poison => ColorSlot::Poison,
             IconSlot::Laser => ColorSlot::Laser,
             IconSlot::Pistol => ColorSlot::Pistol,
+            IconSlot::Grenade => ColorSlot::Grenade,
+            IconSlot::Flashbang => ColorSlot::Flashbang,
+            IconSlot::Smoke => ColorSlot::Smoke,
         }
     }
 }
@@ -241,6 +255,18 @@ pub struct Rules {
     pub bullet_speed: u64,
     /// Bots playing against you in single player. Rooms seat theirs apart.
     pub bots: u8,
+    /// How often a thrown item appears, with guns on; 0 for never.
+    pub thrown_interval_s: u64,
+    /// How long it stays on the board if nobody takes it.
+    pub thrown_ttl_s: u64,
+    /// Cells a grenade's blast reaches from where it lands.
+    pub grenade_radius: u16,
+    /// How long a flashbang blinds.
+    pub flash_s: u64,
+    /// Cells a smoke cloud reaches from where it lands.
+    pub smoke_radius: u16,
+    /// How long it lasts.
+    pub smoke_s: u64,
 }
 
 impl Default for Rules {
@@ -268,6 +294,12 @@ impl Default for Rules {
             gun_hold_s: 5,
             bullet_speed: 3,
             bots: 0,
+            thrown_interval_s: 15,
+            thrown_ttl_s: 8,
+            grenade_radius: 2,
+            flash_s: 3,
+            smoke_radius: 3,
+            smoke_s: 8,
         }
     }
 }
@@ -306,6 +338,17 @@ impl Rules {
                     " guns:{}/{}/{}/{}",
                     self.gun_interval_s, self.gun_ttl_s, self.gun_hold_s, self.bullet_speed
                 ));
+                if self.thrown_interval_s > 0 {
+                    key.push_str(&format!(
+                        " thrown:{}/{} blast:{} flash:{} smoke:{}/{}",
+                        self.thrown_interval_s,
+                        self.thrown_ttl_s,
+                        self.grenade_radius,
+                        self.flash_s,
+                        self.smoke_radius,
+                        self.smoke_s
+                    ));
+                }
             }
         }
         key
@@ -342,11 +385,12 @@ pub struct Theme {
 impl Default for Theme {
     fn default() -> Self {
         Self {
-            // food ●, super food ★, poison ✖, laser ↯, pistol ⌐
-            icons: [0, 4, 11, 18, 19],
+            // food ●, super food ★, poison ✖, laser ↯, pistol ⌐, grenade ⊕,
+            // flashbang ✦, smoke ≋
+            icons: [0, 4, 11, 18, 19, 20, 21, 22],
             // head, body, food, super food, poison, wall, background, laser,
-            // pistol
-            colors: [3, 2, 1, 5, 8, 13, 15, 11, 12],
+            // pistol, grenade, flashbang, smoke
+            colors: [3, 2, 1, 5, 8, 13, 15, 11, 12, 0, 4, 13],
         }
     }
 }
@@ -412,8 +456,9 @@ mod tests {
             "as rooms play"
         );
         assert!(
-            solo.record_key()
-                .ends_with(" timing:tick bots:1 guns:10/8/5/3"),
+            solo.record_key().ends_with(
+                " timing:tick bots:1 guns:10/8/5/3 thrown:15/8 blast:2 flash:3 smoke:3/8"
+            ),
             "{}",
             solo.record_key()
         );

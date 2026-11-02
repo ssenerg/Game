@@ -111,6 +111,9 @@ pub struct Ctx<'a> {
     pub pictures: Option<&'a Pictures>,
     /// Something to tell the player, until their next key.
     pub notice: Option<&'a str>,
+    /// The player's terminal says when keys are let go, to screens that
+    /// want to hear it.
+    pub key_releases: bool,
 }
 
 impl Ctx<'_> {
@@ -123,6 +126,7 @@ impl Ctx<'_> {
             account: None,
             pictures: None,
             notice: None,
+            key_releases: false,
         }
     }
 }
@@ -351,6 +355,12 @@ pub trait GameUi: Any + Send + Sync {
         false
     }
 
+    /// Whether its own screens hear keys let go: while they show, terminals
+    /// that can say so send [`Key::Released`] too.
+    fn wants_key_releases(&self) -> bool {
+        false
+    }
+
     // Rooms. The app runs their lobby and results; the game adds to them
     // and draws its rounds.
 
@@ -366,6 +376,13 @@ pub trait GameUi: Any + Send + Sync {
     /// Whether the room's round, as it is now, takes the mouse, as
     /// [`Self::wants_mouse`] for the game's own screens.
     fn room_wants_mouse(&self, room: &InRoom) -> bool {
+        let _ = room;
+        false
+    }
+
+    /// Whether the room's round, as it is now, hears keys let go, as
+    /// [`Self::wants_key_releases`] for the game's own screens.
+    fn room_wants_key_releases(&self, room: &InRoom) -> bool {
         let _ = room;
         false
     }

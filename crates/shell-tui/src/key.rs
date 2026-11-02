@@ -14,6 +14,9 @@ pub enum Key {
     /// The left mouse button, at a cell of the screen. Only screens that
     /// ask for the mouse get these: see [`crate::GameUi::wants_mouse`].
     Mouse(Mouse),
+    /// A character's key let go, on terminals that say so. Only screens
+    /// that ask get these: see [`crate::GameUi::wants_key_releases`].
+    Released(char),
 }
 
 /// The left button went down or came up at column `x`, row `y`, from the
@@ -54,6 +57,7 @@ impl Key {
     pub fn lower(self) -> Key {
         match self {
             Key::Char(c) => Key::Char(c.to_ascii_lowercase()),
+            Key::Released(c) => Key::Released(c.to_ascii_lowercase()),
             key => key,
         }
     }

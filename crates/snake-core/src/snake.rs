@@ -1,8 +1,9 @@
 use std::collections::VecDeque;
+use std::time::Duration;
 
 use crate::config::GrowthMode;
 use crate::geom::{Direction, Point, wrap_next};
-use crate::guns::Held;
+use crate::guns::{Held, Throw};
 
 /// How many turns a snake can have queued for upcoming ticks.
 pub const QUEUE_CAP: usize = 3;
@@ -14,7 +15,7 @@ pub enum DeathCause {
     /// Another snake's head or body, including head-on crashes.
     OtherSnake,
     Poison,
-    /// A shot to the head.
+    /// A shot or a blast to the head.
     Shot,
     /// The player left the match.
     Left,
@@ -32,9 +33,18 @@ pub struct Snake {
     /// At-tail growth: steps left until each pending segment is added.
     growth: Vec<u32>,
     pub death: Option<DeathCause>,
-    pub gun: Option<Held>,
+    pub held: Option<Held>,
     /// It fires its gun on the next step.
     pub(crate) firing: bool,
+    /// An item it's throwing.
+    pub throw: Option<Throw>,
+    /// Game time when a flashbang stops blinding it.
+    pub blind_until: Duration,
+    /// A blinded bot's moves, planned on the board as it last saw it.
+    /// `None` until it plans them.
+    pub(crate) plan: Option<VecDeque<Direction>>,
+    /// How far a bot means its throw's mark to go before letting go.
+    pub(crate) aim_for: Option<usize>,
 }
 
 impl Snake {
@@ -46,9 +56,18 @@ impl Snake {
             queue: VecDeque::new(),
             growth: Vec::new(),
             death: None,
-            gun: None,
+            held: None,
             firing: false,
+            throw: None,
+            blind_until: Duration::ZERO,
+            plan: None,
+            aim_for: None,
         }
+    }
+
+    /// Whether a flashbang blinds it at game time `clock`.
+    pub fn blind(&self, clock: Duration) -> bool {
+        clock < self.blind_until
     }
 
     pub fn head(&self) -> Point {

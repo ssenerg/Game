@@ -91,8 +91,11 @@ pub fn quick_guns_rules() -> Rules {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SnakeInput {
     Turn(Direction),
-    /// Fires the gun it holds, if any.
+    /// `f`: fires the gun it holds, starts throwing a thrown item, or,
+    /// already throwing, throws it.
     Fire,
+    /// `f` let go: a throw on its way lands.
+    Release,
 }
 
 /// Snake, as rooms play it: moves on the tick and no boost, with a snake
@@ -271,6 +274,7 @@ impl game_api::Round<Snake> for SnakeRound {
         match input {
             SnakeInput::Turn(dir) => self.world.steer(slot, dir),
             SnakeInput::Fire => self.world.fire(slot),
+            SnakeInput::Release => self.world.release(slot),
         };
         None
     }
@@ -330,14 +334,8 @@ impl SnakeRound {
         }
         self.steps += 1;
         for (slot, racer) in self.racers.iter().enumerate() {
-            if is_bot(racer.who.id)
-                && racer.died_at.is_none()
-                && let Some(dir) = bot::choose(world, slot as u8)
-            {
-                world.steer(slot as u8, dir);
-                if bot::fires(world, slot as u8, dir) {
-                    world.fire(slot as u8);
-                }
+            if is_bot(racer.who.id) && racer.died_at.is_none() {
+                bot::drive(world, slot as u8);
             }
         }
         let outcome = world.step();
@@ -535,7 +533,7 @@ mod tests {
 
     #[test]
     fn a_player_fires_the_gun_their_snake_holds() {
-        use crate::guns::{GunKind, Held};
+        use crate::guns::{Held, Item};
 
         let mut round = Room::new(
             RoomSettings::new(quick_guns_rules(), RoomKind::Private).unwrap(),
@@ -553,8 +551,8 @@ mod tests {
                 (&[(10, 3), (10, 4), (10, 5), (10, 6)], Direction::Up),
             ],
         );
-        round.round_mut().unwrap().world.snakes[0].gun = Some(Held {
-            kind: GunKind::Laser,
+        round.round_mut().unwrap().world.snakes[0].held = Some(Held {
+            kind: Item::Laser,
             until: Duration::from_secs(600),
         });
         round.play(1, SnakeInput::Fire, None);

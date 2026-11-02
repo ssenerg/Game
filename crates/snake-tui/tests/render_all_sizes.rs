@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 use game_api::GameId;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::buffer::Buffer;
 use ratatui::layout::Size;
+use ratatui::style::Color;
 use shell_tui::app::BOTS_OFFERED_AFTER;
 use shell_tui::online::{
     Field, FormKind, FriendRow, FriendsView, KeyRow, LeaderRow, LeaderboardView, MyPlace, Profile,
@@ -16,7 +18,7 @@ use shell_tui::online::{
 use shell_tui::{App, Screen};
 use snake_core::config::{GameConfig, Rules};
 use snake_core::geom::{Direction, Point};
-use snake_core::guns::{GunKind, Held};
+use snake_core::guns::{Cloud, Held, Item, disc};
 use snake_core::records::Records;
 use snake_core::round::RatingChange;
 use snake_core::round::{
@@ -124,14 +126,47 @@ fn screens(rules: &Rules) -> Vec<App> {
         gun_interval_s: 3,
         ..rules.clone()
     };
-    if let Ok(mut game) = SoloGame::new(armed) {
+    if let Ok(mut game) = SoloGame::new(armed.clone()) {
         let mut app = new_app(SnakeScreen::Playing);
         game.started = true;
         game.world.advance_clock(Duration::from_secs(4));
-        game.world.snakes[0].gun = Some(Held {
-            kind: GunKind::Pistol,
+        game.world.snakes[0].held = Some(Held {
+            kind: Item::Pistol,
             until: game.world.clock + Duration::from_secs(3),
         });
+        snake(&mut app).game = Some(game);
+        apps.push(app);
+    }
+    // Throwing under smoke and a blast, and then blinded too, on terminals
+    // that don't say when keys are let go and on one that does.
+    for (blind, releases) in [(false, false), (true, false), (true, true)] {
+        let Ok(mut game) = SoloGame::new(armed.clone()) else {
+            break;
+        };
+        game.started = true;
+        let world = &mut game.world;
+        world.snakes[0].held = Some(Held {
+            kind: Item::Grenade,
+            until: world.clock + Duration::from_secs(3),
+        });
+        world.fire(0);
+        world.step();
+        let (w, h) = (world.width, world.height);
+        let until = world.clock + Duration::from_secs(2);
+        let at = |x: u16, y: u16| Point { x: x % w, y: y % h };
+        world.smoke.push(Cloud {
+            cells: disc(at(3, 3), 3, w, h),
+            until,
+        });
+        let cells = disc(at(9, 4), 2, w, h);
+        world.bursts.push((Item::Grenade, Cloud { cells, until }));
+        if blind {
+            world.snakes[0].blind_until = until;
+        }
+        let mut app = new_app(SnakeScreen::Playing);
+        if releases {
+            app.hear_key_releases();
+        }
         snake(&mut app).game = Some(game);
         apps.push(app);
     }
@@ -216,14 +251,34 @@ fn room_views(rules: &Rules) -> Vec<RoomView> {
     let mut view = round.view();
     let board = view.game.board.as_mut().expect("a board");
     let p = |x, y| Point { x, y };
-    board.guns = vec![(p(3, 3), GunKind::Laser), (p(4, 3), GunKind::Pistol)];
+    board.items = vec![(p(3, 3), Item::Laser), (p(4, 3), Item::Pistol)];
     board.bullets = vec![(p(10, 2), Direction::Right)];
     board.beams = vec![
         (Direction::Right, (5..15).map(|x| p(x, 9)).collect()),
         (Direction::Up, (1..8).map(|y| p(20, y)).collect()),
     ];
     for snake in &mut board.snakes {
-        snake.gun = Some((GunKind::Laser, Duration::from_millis(2500)));
+        snake.held = Some((Item::Laser, Duration::from_millis(2500)));
+    }
+    views.push(view.clone());
+    // Thrown items too: on the board, on their way, going off, and some
+    // throwing them, half of them blinded.
+    let board = view.game.board.as_mut().expect("a board");
+    let (w, h) = (board.width, board.height);
+    board.items = (0..)
+        .zip(Item::THROWN)
+        .map(|(i, kind)| (p(3 + i, 3), kind))
+        .collect();
+    board.marks = vec![(p(8, 4), Item::Grenade), (p(w - 1, 0), Item::Smoke)];
+    board.bursts = vec![
+        (Item::Grenade, disc(p(12, 6), 2, w, h)),
+        (Item::Flashbang, disc(p(0, h - 1), 1, w, h)),
+    ];
+    board.smoke = disc(p(16, 8), 3, w, h);
+    for (i, snake) in board.snakes.iter_mut().enumerate() {
+        snake.held = Some((Item::THROWN[i % 3], Duration::from_millis(2500)));
+        snake.throwing = (i % 3 == 1).then_some(Item::Smoke);
+        snake.blind = (i % 2 == 0).then(|| Duration::from_millis(1500));
     }
     views.push(view);
 
@@ -485,6 +540,20 @@ fn online_screens(rules: &Rules) -> Vec<App> {
     let mut app = new_app(Screen::Room);
     app.enter_room(1, Arc::new(armed.clone()));
     apps.push(app);
+    // Throwing, with smoke about, and blinded, on a terminal that says
+    // when keys are let go.
+    let thrown = views
+        .iter()
+        .find(|v| v.game.board.as_ref().is_some_and(|b| !b.smoke.is_empty()))
+        .expect("a round with thrown items");
+    for releases in [false, true] {
+        let mut app = new_app(Screen::Room);
+        app.enter_room(1, Arc::new(thrown.clone()));
+        if releases {
+            app.hear_key_releases();
+        }
+        apps.push(app);
+    }
     // Quick play's choice of pools, at each.
     for selected in 0..2 {
         let mut app = new_app(Screen::Game);
@@ -560,17 +629,82 @@ fn smallest_and_largest_boards_draw() {
     }
 }
 
-/// What a `w`×`h` terminal shows of `app`.
-fn shown(app: &App, w: u16, h: u16) -> String {
+/// What a `w`×`h` terminal holds after drawing `app`.
+fn drawn(app: &App, w: u16, h: u16) -> Buffer {
     let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
     terminal
         .draw(|frame| shell_tui::ui::draw(frame, app))
         .unwrap();
-    let buffer = terminal.backend().buffer();
+    terminal.backend().buffer().clone()
+}
+
+/// What a `w`×`h` terminal shows of `app`.
+fn shown(app: &App, w: u16, h: u16) -> String {
+    let buffer = drawn(app, w, h);
     (0..h)
         .map(|y| (0..w).map(|x| buffer[(x, y)].symbol()).collect::<String>())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[test]
+fn a_flashbang_whites_out_the_board_only_for_those_it_blinds() {
+    let armed = RoomSettings::new(quick_guns_rules(), RoomKind::Match).unwrap();
+    let mut round = Room::new_match(armed, 4, vec![entrant(1), bot_entrant(0)]);
+    while !matches!(round.view().shell.phase, PhaseView::Running { .. }) {
+        round.advance(Duration::from_millis(100));
+    }
+    let view = round.view();
+    let board = view.game.board.as_ref().expect("a board");
+    let (w, h) = ui::room_size(board.width, board.height);
+    let cells = usize::from(board.width) * 2 * usize::from(board.height);
+    let mine = view.shell.seats.iter().find(|s| s.who.id == 1);
+    let mine = mine.and_then(|s| s.slot).expect("a seat");
+    // How much of the screen is white, and what it says, for `me` while
+    // the flashbang blinds snake `blind` and they hold `held`.
+    let seen = |me: u64, blind: u8, held: Option<Item>, releases: bool| {
+        let mut view = view.clone();
+        for snake in &mut view.game.board.as_mut().unwrap().snakes {
+            if snake.id == blind {
+                snake.blind = Some(Duration::from_millis(1800));
+            }
+            if snake.id == mine {
+                snake.held = held.map(|kind| (kind, Duration::from_millis(2500)));
+            }
+        }
+        let mut app = app_with(GameConfig::default(), "~p");
+        app.screen = Screen::Room;
+        app.enter_room(me, Arc::new(view));
+        if releases {
+            app.hear_key_releases();
+        }
+        let buffer = drawn(&app, w, h);
+        let white = buffer
+            .content
+            .iter()
+            .filter(|c| c.bg == Color::White)
+            .count();
+        (white, shown(&app, w, h))
+    };
+    let (white, text) = seen(1, mine, None, false);
+    assert!(white >= cells, "{white} of {cells}:\n{text}");
+    assert!(text.contains("Blinded · 2 s · ←↑↓→ move"), "{text}");
+    let (white, text) = seen(1, 1 - mine, None, false);
+    assert!(white < 10, "the other snake is blinded, not me:\n{text}");
+    assert!(!text.contains("Blinded"), "{text}");
+    let (white, _) = seen(99, mine, None, false);
+    assert!(white < 10, "those watching see as ever");
+
+    // How to throw, by what the terminal can say.
+    let (_, text) = seen(1, 1 - mine, Some(Item::Grenade), false);
+    assert!(text.contains("grenade · f to aim · 3 s"), "{text}");
+    let (_, text) = seen(1, 1 - mine, Some(Item::Grenade), true);
+    assert!(text.contains("grenade · hold f to aim · 3 s"), "{text}");
+    let (_, text) = seen(1, mine, Some(Item::Pistol), true);
+    assert!(
+        text.contains("Blinded · 2 s · ") && text.contains("pistol · f fire"),
+        "{text}"
+    );
 }
 
 #[test]

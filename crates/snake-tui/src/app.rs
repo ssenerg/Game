@@ -370,6 +370,8 @@ impl GameUi for SnakeUi {
                     self.screen = SnakeScreen::Paused { selected: 0 };
                 } else if let (Key::Char('f'), Some(game)) = (key, &mut self.game) {
                     game.fire();
+                } else if let (Key::Released('f'), Some(game)) = (key, &mut self.game) {
+                    game.release();
                 } else if let (Some(dir), Some(game)) = (direction(key), &mut self.game) {
                     game.turn(dir);
                 }
@@ -440,6 +442,11 @@ impl GameUi for SnakeUi {
         self.screen == SnakeScreen::Playing
     }
 
+    /// Letting go of `f` throws, so a game with guns hears it.
+    fn wants_key_releases(&self) -> bool {
+        self.screen == SnakeScreen::Playing && self.game.as_ref().is_some_and(|g| g.rules().guns)
+    }
+
     fn draw(&self, frame: &mut Frame, ctx: &Ctx) {
         ui::draw(frame, self, ctx);
     }
@@ -455,6 +462,10 @@ impl GameUi for SnakeUi {
             .my_seat()
             .and_then(|s| racer(view, s))
             .is_some_and(|r| r.alive)
+    }
+
+    fn room_wants_key_releases(&self, room: &InRoom) -> bool {
+        self.in_play(room) && snake_view(room).is_some_and(|v| v.settings.guns)
     }
 
     fn room_key(&mut self, key: Key, room: &InRoom) -> Option<Reply> {
@@ -492,6 +503,7 @@ impl GameUi for SnakeUi {
             PhaseView::Countdown { .. } | PhaseView::Running { .. } if self.in_play(room) => {
                 let input = match key {
                     Key::Char('f') => SnakeInput::Fire,
+                    Key::Released('f') => SnakeInput::Release,
                     key => SnakeInput::Turn(direction(key)?),
                 };
                 Some(Reply::fx(GameFx::Play(encode(&input))))
@@ -540,8 +552,7 @@ impl GameUi for SnakeUi {
     }
 
     fn draw_round(&self, frame: &mut Frame, room: &InRoom, ctx: &Ctx) {
-        let _ = ctx;
-        ui::draw_round(frame, self, room);
+        ui::draw_round(frame, self, room, ctx.key_releases);
     }
 
     fn result_note(&self, room: &InRoom) -> Option<String> {
@@ -681,18 +692,16 @@ mod tests {
         assert_eq!(ui.cfg.rules.bots, 0);
     }
 
-    #[test]
-    fn f_fires_in_single_player() {
-        use snake_core::guns::{GunKind, Held};
-
+    /// A single-player game with guns, started, the player holding `kind`.
+    fn armed(kind: snake_core::guns::Item) -> SnakeUi {
         let mut ui = snake();
         ui.selected = row("guns");
         key(&mut ui, Key::Right);
         key(&mut ui, Key::Enter);
         let game = ui.game.as_mut().unwrap();
         assert_eq!(game.world.snakes.len(), 2, "you and a bot");
-        game.world.snakes[0].gun = Some(Held {
-            kind: GunKind::Laser,
+        game.world.snakes[0].held = Some(snake_core::guns::Held {
+            kind,
             until: Duration::from_secs(60),
         });
         // Going on the way it faces starts the game.
@@ -702,13 +711,43 @@ mod tests {
             Direction::Left => Key::Left,
             Direction::Right => Key::Right,
         };
-        let tick = game.tick_interval();
         key(&mut ui, ahead);
-        key(&mut ui, Key::Char('f'));
+        ui
+    }
+
+    /// Plays a tick.
+    fn step(ui: &mut SnakeUi) {
+        let tick = ui.game.as_ref().unwrap().tick_interval();
         ui.tick(tick);
+    }
+
+    #[test]
+    fn f_fires_in_single_player() {
+        let mut ui = armed(snake_core::guns::Item::Laser);
+        key(&mut ui, Key::Char('f'));
+        step(&mut ui);
         let game = ui.game.as_ref().unwrap();
         assert_eq!(game.world.beams.len(), 1, "the laser fired");
-        assert_eq!(game.snake().gun, None);
+        assert_eq!(game.snake().held, None);
+    }
+
+    #[test]
+    fn letting_go_of_f_throws_and_so_does_a_second_f() {
+        for second in [Key::Released('F'), Key::Char('f')] {
+            let mut ui = armed(snake_core::guns::Item::Smoke);
+            assert!(ui.wants_key_releases(), "letting go of f throws");
+            key(&mut ui, Key::Char('f'));
+            step(&mut ui);
+            let game = ui.game.as_ref().unwrap();
+            assert!(game.snake().throw.is_some(), "on its way");
+            assert!(game.world.smoke.is_empty());
+            key(&mut ui, second);
+            step(&mut ui);
+            let game = ui.game.as_ref().unwrap();
+            assert_eq!(game.world.smoke.len(), 1, "thrown by {second:?}");
+            key(&mut ui, Key::Esc);
+            assert!(!ui.wants_key_releases(), "not while paused");
+        }
     }
 
     #[test]

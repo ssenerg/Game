@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::geom::{Direction, Point};
-use crate::guns::GunKind;
+use crate::guns::Item;
 use crate::world::FoodKind;
 
 /// Everything needed to draw a board, detached from the [`crate::world::World`]
@@ -17,12 +17,18 @@ pub struct MatchView {
     pub walls: Arc<[bool]>,
     pub snakes: Vec<SnakeView>,
     pub foods: Vec<(Point, FoodKind)>,
-    /// Guns waiting to be taken.
-    pub guns: Vec<(Point, GunKind)>,
+    /// Items waiting to be taken.
+    pub items: Vec<(Point, Item)>,
     /// Pistols' bullets in flight, and which way each goes.
     pub bullets: Vec<(Point, Direction)>,
     /// The cells lasers lit a moment ago, with the way each went.
     pub beams: Vec<(Direction, Vec<Point>)>,
+    /// Where throws on their way would land, and what each throws.
+    pub marks: Vec<(Point, Item)>,
+    /// The cells grenades' blasts and flashbangs' flashes lit a moment ago.
+    pub bursts: Vec<(Item, Vec<Point>)>,
+    /// Cells under smoke, which hides what's there from everyone.
+    pub smoke: Vec<Point>,
     pub clock: Duration,
 }
 
@@ -33,8 +39,12 @@ pub struct SnakeView {
     /// Head first; empty once a dead snake has turned into food.
     pub body: Vec<Point>,
     pub alive: bool,
-    /// The gun it holds, and how long it has left to fire it.
-    pub gun: Option<(GunKind, Duration)>,
+    /// The item it holds, and how long it has left to use it.
+    pub held: Option<(Item, Duration)>,
+    /// An item it's throwing, until it lets go.
+    pub throwing: Option<Item>,
+    /// How long a flashbang still blinds it.
+    pub blind: Option<Duration>,
 }
 
 impl MatchView {
