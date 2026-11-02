@@ -97,7 +97,7 @@ fn board_widget_draws_exactly_what_the_old_code_did() {
     assert!(view.foods.iter().any(|f| f.1 == FoodKind::Poison));
 
     let mut theme = Theme::default();
-    for colors in [theme.colors, [0, 1, 2, 3, 4, 5, 6]] {
+    for colors in [theme.colors, [0, 1, 2, 3, 4, 5, 6, 7, 8]] {
         theme.colors = colors;
         let area = Rect::new(3, 2, 60, 18);
         let mut old = Buffer::empty(Rect::new(0, 0, 70, 24));

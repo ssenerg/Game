@@ -159,6 +159,30 @@ fn quick_play_picks_a_pool_and_opens_at_it_next_time() {
 }
 
 #[test]
+fn enter_on_a_matchs_results_waits_in_the_same_pool_again() {
+    let mut app = online();
+    assert_eq!(queue_at(&mut app, 1), [quick_play(GUNS_POOL)]);
+    let settings = RoomSettings::new(quick_rules(), RoomKind::Match).unwrap();
+    let players = [1, 2]
+        .map(|id| Entrant {
+            id,
+            name: format!("~p{id}"),
+        })
+        .to_vec();
+    let mut round = Room::new_match(settings, 1, players);
+    while !matches!(round.view().shell.phase, PhaseView::Results { .. }) {
+        round.advance(Duration::from_millis(100));
+    }
+    app.enter_room(1, Arc::new(round.view()));
+    assert_eq!(
+        app.handle(Key::Enter),
+        [Effect::LeaveRoom, quick_play(GUNS_POOL)],
+        "no choosing again"
+    );
+    assert_eq!(app.screen, Screen::Finding);
+}
+
+#[test]
 fn quick_play_queues_on_a_small_terminal_too() {
     let mut app = online();
     app.resize(Size::new(60, 20));

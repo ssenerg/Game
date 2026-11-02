@@ -17,14 +17,15 @@ const DIGITS: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
 /// going up or down, so it reads as one line.
 const BEAM_ACROSS: [&str; 2] = ["━", "━"];
 const BEAM_DOWN: [&str; 2] = ["┃", " "];
-const BEAM_COLOR: Color = Color::LightCyan;
 
-/// How a gun shows, on the board and beside it.
-pub fn gun_look(kind: GunKind) -> (&'static str, Color) {
-    match kind {
-        GunKind::Laser => ("↯", BEAM_COLOR),
-        GunKind::Pistol => ("⌐", Color::White),
-    }
+/// How a gun shows in this player's theme, on the board and beside it. Its
+/// shots take its color.
+pub fn gun_look(theme: &Theme, kind: GunKind) -> (&'static str, Color) {
+    let (icon, color) = match kind {
+        GunKind::Laser => (IconSlot::Laser, ColorSlot::Laser),
+        GunKind::Pistol => (IconSlot::Pistol, ColorSlot::Pistol),
+    };
+    (theme.icon(icon), theme_color(theme, color))
 }
 
 /// How one snake is drawn in multiplayer.
@@ -109,7 +110,7 @@ impl Widget for BoardWidget<'_> {
             paint(p, [theme.icon(icon), " "], style);
         }
         for &(p, kind) in &view.guns {
-            let (icon, color) = gun_look(kind);
+            let (icon, color) = gun_look(theme, kind);
             paint(p, [icon, " "], plain(color).add_modifier(Modifier::BOLD));
         }
         let look = |id: u8| {
@@ -131,16 +132,17 @@ impl Widget for BoardWidget<'_> {
             paint(
                 p,
                 ["•", " "],
-                plain(Color::White).add_modifier(Modifier::BOLD),
+                plain(gun_look(theme, GunKind::Pistol).1).add_modifier(Modifier::BOLD),
             );
         }
+        let beam = gun_look(theme, GunKind::Laser).1;
         for (dir, cells) in &view.beams {
             let line = match dir {
                 Direction::Left | Direction::Right => BEAM_ACROSS,
                 Direction::Up | Direction::Down => BEAM_DOWN,
             };
             for &p in cells {
-                paint(p, line, plain(BEAM_COLOR).add_modifier(Modifier::BOLD));
+                paint(p, line, plain(beam).add_modifier(Modifier::BOLD));
             }
         }
         for snake in &view.snakes {

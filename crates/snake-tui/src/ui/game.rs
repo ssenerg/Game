@@ -3,12 +3,14 @@ use ratatui::layout::{Alignment, Size};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Padding, Paragraph};
+use snake_core::config::ColorSlot;
 use snake_core::solo::SoloGame;
 
-use shell_tui::ui::centered_rect;
+use shell_tui::ui::{centered_rect, secs};
 
-use super::board::BoardWidget;
+use super::board::{BoardWidget, SnakeLook, gun_look};
 use crate::app::SnakeUi;
+use crate::palette::{opponent_colors, theme_color};
 
 const PAD_X: u16 = 2;
 const PAD_Y: u16 = 1;
@@ -56,11 +58,37 @@ pub fn draw(frame: &mut Frame, app: &SnakeUi) {
         .padding(Padding::new(PAD_X, PAD_X, PAD_Y, PAD_Y))
         .title_top(title_line())
         .title_top(stats_line(app, game, need_w).right_aligned())
-        .title_bottom(hint_line(game).centered());
+        .title_bottom(hint_line(app, game).centered());
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
     let view = game.world.view();
-    frame.render_widget(BoardWidget::new(&view, &app.cfg.theme), inner);
+    let looks = looks(app, game);
+    let mut board = BoardWidget::new(&view, &app.cfg.theme);
+    if game.rules().bots > 0 {
+        board.looks = Some(&looks);
+    }
+    frame.render_widget(board, inner);
+}
+
+/// The player's snake in their own colors, and each bot in one apart from
+/// them, with its number on its head.
+fn looks(app: &SnakeUi, game: &SoloGame) -> Vec<SnakeLook> {
+    let theme = &app.cfg.theme;
+    let others = opponent_colors(theme);
+    let mut looks = vec![SnakeLook {
+        head: theme_color(theme, ColorSlot::Head),
+        body: theme_color(theme, ColorSlot::Body),
+        number: None,
+    }];
+    looks.extend((1..game.world.snakes.len()).map(|id| {
+        let color = others[(id - 1) % others.len()];
+        SnakeLook {
+            head: color,
+            body: color,
+            number: Some(id as u8),
+        }
+    }));
+    looks
 }
 
 fn title_line() -> Line<'static> {
@@ -89,7 +117,7 @@ fn stats_line(app: &SnakeUi, game: &SoloGame, board_w: u16) -> Line<'static> {
             Span::styled(format!("{time} "), bold),
         ]);
     }
-    Line::from(vec![
+    let mut line = vec![
         Span::styled(" Length ", dim),
         Span::styled(len.to_string(), bold),
         Span::styled(" · ", dim),
@@ -99,11 +127,24 @@ fn stats_line(app: &SnakeUi, game: &SoloGame, board_w: u16) -> Line<'static> {
         Span::styled(" · ", dim),
         Span::styled(time, bold),
         Span::raw(" "),
-    ])
+    ];
+    if game.rules().bots > 0 {
+        let left = game.bots_left();
+        let s = if left == 1 { "" } else { "s" };
+        line.insert(0, Span::styled(format!(" {left} bot{s} ·"), dim));
+    }
+    Line::from(line)
 }
 
-fn hint_line(game: &SoloGame) -> Line<'static> {
-    if !game.started {
+fn hint_line(app: &SnakeUi, game: &SoloGame) -> Line<'static> {
+    if let Some(held) = game.snake().gun.filter(|_| game.over.is_none()) {
+        let (icon, color) = gun_look(&app.cfg.theme, held.kind);
+        let left = secs(held.until.saturating_sub(game.clock())).max(1);
+        Line::styled(
+            format!(" {icon} {} · f fire · {left} s ", held.kind.name()),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )
+    } else if !game.started {
         Line::styled(
             " press an arrow key to start ",
             Style::default()

@@ -16,7 +16,7 @@ use shell_tui::online::{
 use shell_tui::{App, Screen};
 use snake_core::config::{GameConfig, Rules};
 use snake_core::geom::{Direction, Point};
-use snake_core::guns::GunKind;
+use snake_core::guns::{GunKind, Held};
 use snake_core::records::Records;
 use snake_core::round::RatingChange;
 use snake_core::round::{
@@ -117,9 +117,29 @@ fn screens(rules: &Rules) -> Vec<App> {
     for selected in [0, 1] {
         apps.push(new_app(SnakeScreen::Paused { selected }));
     }
+    // Against bots with guns, holding one, with shots on the board.
+    let armed = Rules {
+        guns: true,
+        bots: 3,
+        gun_interval_s: 3,
+        ..rules.clone()
+    };
+    if let Ok(mut game) = SoloGame::new(armed) {
+        let mut app = new_app(SnakeScreen::Playing);
+        game.started = true;
+        game.world.advance_clock(Duration::from_secs(4));
+        game.world.snakes[0].gun = Some(Held {
+            kind: GunKind::Pistol,
+            until: game.world.clock + Duration::from_secs(3),
+        });
+        snake(&mut app).game = Some(game);
+        apps.push(app);
+    }
     for reason in [
         GameOverReason::HitWall,
         GameOverReason::HitSelf,
+        GameOverReason::HitBot,
+        GameOverReason::Shot,
         GameOverReason::Poisoned,
         GameOverReason::MaxLength,
     ] {

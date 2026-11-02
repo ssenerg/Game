@@ -78,7 +78,9 @@ pub fn draw(frame: &mut Frame, app: &SnakeUi, online: bool) {
     let all: Vec<usize> = (0..SETTINGS.len()).collect();
     draw_settings(frame, inner, &app.cfg, &all, app.selected, true);
 
-    let record = app.records.get(&app.cfg.rules.record_key());
+    let record = app
+        .records
+        .get(&app.cfg.rules.clone().for_solo().record_key());
     let hint = if app.confirm_reset {
         Line::from("press r again to reset all settings · any other key cancels").style(
             Style::default()

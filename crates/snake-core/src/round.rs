@@ -122,9 +122,11 @@ impl Game for Snake {
 }
 
 /// `rules` as multiplayer plays them: moves on the tick, and no boost.
+/// Rooms seat their own bots, apart from single player's.
 fn multiplayer(mut rules: Rules) -> Rules {
     rules.move_timing = MoveTiming::OnTick;
     rules.boost_duration_s = 0;
+    rules.bots = 0;
     rules
 }
 
@@ -476,6 +478,12 @@ mod tests {
         let settings = RoomSettings::new(Rules::default(), RoomKind::Private).unwrap();
         assert_eq!(settings.game.move_timing, MoveTiming::OnTick);
         assert_eq!(settings.game.boost_duration_s, 0);
+        let solo_bots = Rules {
+            bots: 3,
+            ..Rules::default()
+        };
+        let with_bots = RoomSettings::new(solo_bots, RoomKind::Private).unwrap();
+        assert_eq!(with_bots.game.bots, 0, "rooms seat their own");
         assert_eq!(settings.max_players, MAX_PLAYERS);
         let tiny = Rules {
             width: 10,

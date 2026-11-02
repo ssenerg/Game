@@ -90,6 +90,8 @@ pub fn draw_game_over(frame: &mut Frame, app: &SnakeUi, new_record: bool) {
     let (reason, color) = match game.over {
         Some(GameOverReason::HitWall) => ("You crashed into a wall!", Color::LightRed),
         Some(GameOverReason::HitSelf) => ("You bit yourself!", Color::LightRed),
+        Some(GameOverReason::HitBot) => ("You crashed into a bot!", Color::LightRed),
+        Some(GameOverReason::Shot) => ("A bot shot you!", Color::LightRed),
         Some(GameOverReason::Poisoned) => ("✖ You ate poison!", Color::LightMagenta),
         Some(GameOverReason::MaxLength) => ("★ Board complete — you win! ★", Color::LightGreen),
         None => ("", Color::White),

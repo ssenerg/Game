@@ -11,7 +11,7 @@ use ratatui::widgets::{Block, BorderType, Paragraph};
 use shell_tui::GameUi;
 use shell_tui::online::InRoom;
 use shell_tui::ui::{dialog, dim, ping_style, ping_text, secs};
-use snake_core::config::ColorSlot;
+use snake_core::config::{ColorSlot, Theme};
 use snake_core::geom::Point;
 use snake_core::guns::GunKind;
 use snake_core::round::{PhaseView, RoomView};
@@ -163,7 +163,7 @@ fn draw_match(frame: &mut Frame, app: &SnakeUi, room: &InRoom, view: &RoomView, 
     frame.render_widget(widget, inner);
 
     if score_w > 0 {
-        draw_scores(frame, room, view, board, &looks, score_rect);
+        draw_scores(frame, room, view, board, &app.cfg.theme, &looks, score_rect);
     }
     let (need_w, need_h) = room_size(board.width, board.height);
     let playing = app.in_play(room);
@@ -173,8 +173,16 @@ fn draw_match(frame: &mut Frame, app: &SnakeUi, room: &InRoom, view: &RoomView, 
         .and_then(|slot| board.snakes.iter().find(|s| s.id == slot))
         .and_then(|s| s.gun);
     frame.render_widget(
-        Paragraph::new(status_line(room, playing, held, cropped, need_w, need_h))
-            .alignment(Alignment::Center),
+        Paragraph::new(status_line(
+            room,
+            playing,
+            held,
+            &app.cfg.theme,
+            cropped,
+            need_w,
+            need_h,
+        ))
+        .alignment(Alignment::Center),
         status,
     );
     if let PhaseView::Countdown { left } = &view.shell.phase {
@@ -187,6 +195,7 @@ fn draw_scores(
     room: &InRoom,
     view: &RoomView,
     board: &MatchView,
+    theme: &Theme,
     looks: &[SnakeLook],
     rect: Rect,
 ) {
@@ -212,7 +221,7 @@ fn draw_scores(
     let gun = |slot: Option<u8>| {
         let slot = slot?;
         let (kind, _) = board.snakes.iter().find(|s| s.id == slot)?.gun?;
-        Some(gun_look(kind))
+        Some(gun_look(theme, kind))
     };
     let followed = room.followed().map(|s| s.who.id);
     // Round trips go last, as numbers if names keep 8 columns, or else as
@@ -288,6 +297,7 @@ fn status_line(
     room: &InRoom,
     playing: bool,
     held: Option<(GunKind, Duration)>,
+    theme: &Theme,
     cropped: bool,
     need_w: u16,
     need_h: u16,
@@ -318,7 +328,7 @@ fn status_line(
         }
         PhaseView::Running { .. } => match held {
             Some((kind, left)) => {
-                let (icon, color) = gun_look(kind);
+                let (icon, color) = gun_look(theme, kind);
                 let bold = Style::default().fg(color).add_modifier(Modifier::BOLD);
                 Line::from(vec![
                     Span::styled(

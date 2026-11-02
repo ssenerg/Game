@@ -139,14 +139,22 @@ impl SnakeUi {
         }
     }
 
-    fn start_game(&mut self, fx: &mut Vec<GameFx>) {
-        if let Ok(game) = SoloGame::new(self.cfg.rules.clone()) {
-            fx.push(GameFx::SavePrefs(self.prefs()));
-            self.record = self.records.get(&game.rules().record_key());
-            self.game = Some(game);
-            self.screen = SnakeScreen::Playing;
-            self.pause_if_hidden();
-        }
+    /// Starts a game by the settings, or says why it can't.
+    fn start_game(&mut self, reply: &mut Reply) {
+        let Ok(game) = SoloGame::new(self.cfg.rules.clone()) else {
+            let bots = self.cfg.rules.clone().for_solo().bots;
+            let s = if bots == 1 { "" } else { "s" };
+            reply.notice = Some(format!(
+                "The snake and {bots} bot{s} don't fit on this board. Make it bigger, \
+                 or play fewer bots."
+            ));
+            return;
+        };
+        reply.fx.push(GameFx::SavePrefs(self.prefs()));
+        self.record = self.records.get(&game.rules().record_key());
+        self.game = Some(game);
+        self.screen = SnakeScreen::Playing;
+        self.pause_if_hidden();
     }
 
     fn save_record(&mut self, fx: &mut Vec<GameFx>) -> bool {
@@ -174,11 +182,14 @@ impl SnakeUi {
             Key::Up | Key::Down | Key::Char('w' | 'k' | 's' | 'j') => {
                 self.selected = key.step(self.selected, SETTINGS.len()).unwrap_or(0);
             }
-            Key::Left | Key::Char('a' | 'h') => self.cfg.adjust(self.selected, -1),
-            Key::Right | Key::Char('d' | 'l') => self.cfg.adjust(self.selected, 1),
+            Key::Left | Key::Char('a' | 'h') | Key::Right | Key::Char('d' | 'l') => {
+                let back = matches!(key, Key::Left | Key::Char('a' | 'h'));
+                self.cfg.adjust(self.selected, if back { -1 } else { 1 });
+                self.cfg.rules.bot_for_guns();
+            }
             Key::Char('r') if confirm_reset => self.cfg = GameConfig::default(),
             Key::Char('r') => self.confirm_reset = true,
-            Key::Enter => self.start_game(&mut reply.fx),
+            Key::Enter => self.start_game(reply),
             _ => {}
         }
     }
@@ -319,6 +330,11 @@ impl GameUi for SnakeUi {
         Ok(QuickStart::Choose)
     }
 
+    /// Another match waits in the same pool: the choice was made already.
+    fn again_in_same_pool(&self) -> bool {
+        true
+    }
+
     fn pool_name(&self, pool: &str) -> Option<String> {
         QUICK_POOLS
             .iter()
@@ -352,6 +368,8 @@ impl GameUi for SnakeUi {
             SnakeScreen::Playing => {
                 if matches!(key, Key::Esc | Key::Char('p')) {
                     self.screen = SnakeScreen::Paused { selected: 0 };
+                } else if let (Key::Char('f'), Some(game)) = (key, &mut self.game) {
+                    game.fire();
                 } else if let (Some(dir), Some(game)) = (direction(key), &mut self.game) {
                     game.turn(dir);
                 }
@@ -372,7 +390,7 @@ impl GameUi for SnakeUi {
                     self.game = None;
                     self.screen = SnakeScreen::Menu;
                 }
-                Key::Char('r') => self.start_game(&mut reply.fx),
+                Key::Char('r') => self.start_game(&mut reply),
                 Key::Char('q') => {
                     self.game = None;
                     self.screen = SnakeScreen::Menu;
@@ -638,6 +656,79 @@ mod tests {
         ui.tick(Duration::from_millis(1));
         assert!(matches!(ui.screen, SnakeScreen::GameOver { .. }));
         assert_eq!(key(&mut ui, Key::Char('q')).next, Next::Home);
+        assert_eq!(ui.screen, SnakeScreen::Menu);
+    }
+
+    /// The settings menu's row for `key`.
+    fn row(key: &str) -> usize {
+        SETTINGS.iter().position(|s| s.key == key).unwrap()
+    }
+
+    #[test]
+    fn guns_in_single_player_bring_a_bot() {
+        let mut ui = snake();
+        ui.selected = row("guns");
+        key(&mut ui, Key::Right);
+        assert!(ui.cfg.rules.guns);
+        assert_eq!(ui.cfg.rules.bots, 1, "someone to shoot");
+        ui.selected = row("bots");
+        key(&mut ui, Key::Left);
+        assert_eq!(ui.cfg.rules.bots, 1, "not none while guns are on");
+        ui.selected = row("guns");
+        key(&mut ui, Key::Left);
+        ui.selected = row("bots");
+        key(&mut ui, Key::Left);
+        assert_eq!(ui.cfg.rules.bots, 0);
+    }
+
+    #[test]
+    fn f_fires_in_single_player() {
+        use snake_core::guns::{GunKind, Held};
+
+        let mut ui = snake();
+        ui.selected = row("guns");
+        key(&mut ui, Key::Right);
+        key(&mut ui, Key::Enter);
+        let game = ui.game.as_mut().unwrap();
+        assert_eq!(game.world.snakes.len(), 2, "you and a bot");
+        game.world.snakes[0].gun = Some(Held {
+            kind: GunKind::Laser,
+            until: Duration::from_secs(60),
+        });
+        // Going on the way it faces starts the game.
+        let ahead = match game.snake().dir {
+            Direction::Up => Key::Up,
+            Direction::Down => Key::Down,
+            Direction::Left => Key::Left,
+            Direction::Right => Key::Right,
+        };
+        let tick = game.tick_interval();
+        key(&mut ui, ahead);
+        key(&mut ui, Key::Char('f'));
+        ui.tick(tick);
+        let game = ui.game.as_ref().unwrap();
+        assert_eq!(game.world.beams.len(), 1, "the laser fired");
+        assert_eq!(game.snake().gun, None);
+    }
+
+    #[test]
+    fn bots_that_dont_fit_say_so() {
+        let mut ui = snake();
+        ui.cfg.rules = Rules {
+            width: 10,
+            height: 8,
+            bots: 7,
+            ..Rules::default()
+        };
+        let reply = key(&mut ui, Key::Enter);
+        assert!(
+            reply
+                .notice
+                .as_deref()
+                .is_some_and(|n| n.contains("7 bots")),
+            "{:?}",
+            reply.notice
+        );
         assert_eq!(ui.screen, SnakeScreen::Menu);
     }
 }

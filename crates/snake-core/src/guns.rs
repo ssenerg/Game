@@ -7,9 +7,6 @@ use std::time::Duration;
 
 use crate::geom::{Direction, Point};
 
-/// Cells a pistol's bullet moves each step; snakes move one.
-pub const BULLET_SPEED: usize = 3;
-
 /// How long a laser's beam stays on the board, to be seen.
 pub const BEAM_SHOWN: Duration = Duration::from_millis(300);
 

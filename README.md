@@ -80,7 +80,8 @@ so in multiplayer turns are always queued for the next tick, and super food
 gives no speed boost.
 
 - **Quick play** asks which queue: **Classic**, or **Guns** (see below).
-  It opens at the one you played last. A match starts as soon as 8 players
+  It opens at the one you played last, and Enter on a match's results
+  waits in the same queue again. A match starts as soon as 8 players
   are waiting, or after 10 seconds with at least 2. It plays one round on a
   30×18 board, which fits an 80×23 terminal. Matches are rated, each queue
   apart. After 20 seconds with nobody to play, press `b` for a match against
@@ -111,15 +112,16 @@ gives no speed boost.
   Taking another gun before firing swaps it for the new one. There are two:
   - the **laser** `↯` hits at once along the whole line, through every snake
     in it, up to a wall or the board's edge (it never wraps);
-  - the **pistol** `⌐` fires one bullet, 3 cells a tick, which stops at the
-    first snake it hits.
+  - the **pistol** `⌐` fires one bullet, 3 cells a tick unless the rules
+    say otherwise, which stops at the first snake it hits.
 
   A shot to the head kills that snake. A shot to the body cuts the snake
   there, and the piece behind turns into food; a snake hit twice keeps only
   what's in front of the hit nearest its head. Your own shots never hit
-  you. A room's host sets how often guns come, how long they stay, and
-  how long you have to fire. Bots go for guns too, and fire when a snake is
-  in their line. Single player has no guns.
+  you. A room's host sets how often guns come, how long they stay, how
+  long you have to fire, and how fast bullets fly. Bots go for guns too,
+  and fire when a snake is in their line. In single player, guns come with
+  at least one bot to shoot.
 - **Winning.** The last snake alive wins. If all the snakes still in play
   crash on the same tick, it's a draw. After 3 minutes, the longest snake
   still alive wins.
@@ -384,6 +386,12 @@ cd /opt/apps/snaketui && sudo -u deploy sh -c 'docker image tag snaketui:previou
 3. Eat food to grow. Poison and walls kill you; so does your own body unless
    pass-through-self is enabled.
 
+**Against bots.** Set **bots** in the settings to play up to 7 bots on your
+board. They play as in rooms: every snake moves on the tick, and super food
+gives no boost. Turn **guns** on too, and guns appear as in rooms (see
+Multiplayer); guns always bring at least one bot. The game ends when your
+snake does, and games against bots keep their own records.
+
 If the terminal gets too small to show the whole board, the game pauses until
 you make the window bigger again and resume.
 
@@ -393,6 +401,7 @@ you make the window bigger again and resume.
 | --- | --- |
 | `↑ ↓ ← →` / `WASD` | Move; in the settings menu, select (`↑ ↓`) and change a value (`← →`). The menu also takes `hjkl` |
 | `Enter` | Start game / confirm |
+| `f` | Fire the gun you hold, against bots or in a room |
 | `Esc` / `p` | Pause (resume or quit to menu) |
 | `r` `r` | Reset all settings to defaults (in the menu; press `r` twice) |
 | `r` | Play again with the same settings (after game over) |
@@ -416,9 +425,10 @@ Letter keys work the same with Shift or Caps Lock on.
 | pass through self | If `yes`, the snake can cross its own body |
 | super food growth | Length gained from super food |
 | super food speed boost | Duration of the 2× speed boost (`off` disables) |
-| guns | Guns in rooms you make (single player has none); with how often one spawns, its lifetime, and the time to fire one |
-| food / super food / poison icon | Glyph drawn on the board (dot, star, heart, cross, …) |
-| colors | Per-cell-type colors (head, body, food, super food, poison, walls, background) |
+| bots | Bots playing against you in single player (`none` for a game alone) |
+| guns | Guns, against bots and in rooms you make; with how often one spawns, its lifetime, the time to fire one, and the bullet speed |
+| food / super food / poison / laser / pistol icon | Glyph drawn on the board (dot, star, heart, cross, zigzag, gun, …) |
+| colors | Per-cell-type colors (head, body, food, super food, poison, walls, background, laser, pistol) |
 
 The board's frame shows your current length, the record for the active
 configuration, and the elapsed play time in its heading.

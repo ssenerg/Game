@@ -1,5 +1,7 @@
 //! Single player: one snake, instant or on-tick moves, a speed boost from
-//! super food, and a win for filling the whole board.
+//! super food, and a win for filling the whole board. Or against bots, by
+//! rooms' rules: every snake on the tick, no boost, and guns if they're on.
+//! The game ends when your snake does.
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -7,6 +9,7 @@ use std::time::Duration;
 use anyhow::Result;
 use rand::RngExt;
 
+use crate::bot;
 use crate::config::{MoveTiming, Rules};
 use crate::geom::Direction;
 use crate::snake::{DeathCause, Snake};
@@ -16,6 +19,9 @@ use crate::world::{FoodKind, World};
 pub enum GameOverReason {
     HitWall,
     HitSelf,
+    /// Into a bot, or head on with one.
+    HitBot,
+    Shot,
     Poisoned,
     MaxLength,
 }
@@ -35,9 +41,21 @@ impl SoloGame {
     }
 
     /// A game that plays out the same way every time for the same keys.
+    /// Fails if the board has no room for the snake, and its bots.
     pub fn with_seed(rules: Rules, seed: u64) -> Result<Self> {
+        let rules = rules.for_solo();
+        let world = match rules.bots {
+            0 => World::solo(rules, seed)?,
+            bots => {
+                let mut world = World::with_players(rules, seed, 1 + bots as usize)?;
+                // Dead bots turn into food, but the player's snake stays to
+                // be seen, and measured, at the end.
+                world.keeps_body = Some(0);
+                world
+            }
+        };
         Ok(Self {
-            world: World::solo(rules, seed)?,
+            world,
             started: false,
             over: None,
             tick_accum: Duration::ZERO,
@@ -51,6 +69,18 @@ impl SoloGame {
 
     pub fn snake(&self) -> &Snake {
         &self.world.snakes[0]
+    }
+
+    /// The bots still playing.
+    pub fn bots_left(&self) -> usize {
+        self.world.snakes[1..].iter().filter(|s| s.alive()).count()
+    }
+
+    /// Fires the gun the snake holds, on the next tick.
+    pub fn fire(&mut self) {
+        if self.started && self.over.is_none() {
+            self.world.fire(0);
+        }
     }
 
     /// The snake's length.
@@ -117,16 +147,22 @@ impl SoloGame {
     }
 
     fn step(&mut self) {
+        for id in 1..self.world.snakes.len() as u8 {
+            if let Some(dir) = bot::choose(&self.world, id) {
+                self.world.steer(id, dir);
+                if bot::fires(&self.world, id, dir) {
+                    self.world.fire(id);
+                }
+            }
+        }
         let outcome = self.world.step();
-        if let Some(&(_, cause)) = outcome.deaths.first() {
+        if let Some(&(_, cause)) = outcome.deaths.iter().find(|(id, _)| *id == 0) {
             self.over = Some(match cause {
                 DeathCause::Wall => GameOverReason::HitWall,
-                // A lone snake can only hit itself: nobody shoots it, and it
-                // never leaves mid-step.
-                DeathCause::OwnBody
-                | DeathCause::OtherSnake
-                | DeathCause::Shot
-                | DeathCause::Left => GameOverReason::HitSelf,
+                // The player never leaves mid-step.
+                DeathCause::OwnBody | DeathCause::Left => GameOverReason::HitSelf,
+                DeathCause::OtherSnake => GameOverReason::HitBot,
+                DeathCause::Shot => GameOverReason::Shot,
                 DeathCause::Poison => GameOverReason::Poisoned,
             });
             return;
@@ -234,5 +270,87 @@ mod tests {
             (game.world.view(), game.over)
         };
         assert_eq!(play(9), play(9));
+    }
+
+    /// A walled board against `bots`, with the player's snake put at (5, 5)
+    /// heading right and every bot's far off in the bottom row.
+    fn against(bots: u8, guns: bool) -> SoloGame {
+        let rules = Rules {
+            bots,
+            guns,
+            food_interval_s: 60,
+            super_interval_s: 0,
+            poison_interval_s: 0,
+            ..Rules::default()
+        };
+        let mut game = SoloGame::with_seed(rules, 2).unwrap();
+        let body = VecDeque::from([Point { x: 5, y: 5 }, Point { x: 4, y: 5 }]);
+        game.world.snakes[0] = Snake::new(0, body, Direction::Right);
+        for id in 1..=bots {
+            let x = 4 * u16::from(id) + 6;
+            let body = VecDeque::from([Point { x, y: 17 }, Point { x: x - 1, y: 17 }]);
+            game.world.snakes[id as usize] = Snake::new(id, body, Direction::Right);
+        }
+        game.world.foods.clear();
+        game
+    }
+
+    #[test]
+    fn bots_play_by_rooms_rules_and_wait_for_the_first_key() {
+        let mut game = against(2, false);
+        assert_eq!(game.world.snakes.len(), 3);
+        assert_eq!(game.rules().move_timing, MoveTiming::OnTick);
+        assert_eq!(game.rules().boost_duration_s, 0);
+        let bot = game.world.snakes[1].head();
+        game.advance(Duration::from_secs(1));
+        assert_eq!(game.world.snakes[1].head(), bot, "frozen until a key");
+        game.turn(Direction::Up);
+        game.advance(game.tick_interval());
+        assert_ne!(game.world.snakes[1].head(), bot, "they move with you");
+        assert_eq!(game.bots_left(), 2);
+        assert_eq!(head(&game), (5, 4), "on the tick");
+    }
+
+    #[test]
+    fn guns_come_with_a_bot_and_fire_with_f() {
+        let mut game = against(1, true);
+        assert_eq!(game.rules().bots, 1, "someone to shoot");
+        game.world.snakes[0].gun = Some(crate::guns::Held {
+            kind: crate::guns::GunKind::Pistol,
+            until: Duration::from_secs(60),
+        });
+        game.fire();
+        assert!(game.world.bullets.is_empty(), "not before the game starts");
+        game.turn(Direction::Right);
+        game.fire();
+        game.advance(game.tick_interval());
+        assert_eq!(game.world.bullets.len(), 1);
+        assert_eq!(game.snake().gun, None);
+    }
+
+    #[test]
+    fn a_bots_shot_ends_the_game() {
+        let mut game = against(1, true);
+        // A bullet of the bot's, coming at the player's head.
+        game.world.bullets.push(crate::guns::Bullet {
+            owner: 1,
+            pos: Point { x: 7, y: 5 },
+            dir: Direction::Left,
+        });
+        game.turn(Direction::Right);
+        game.advance(game.tick_interval());
+        assert_eq!(game.over, Some(GameOverReason::Shot));
+        assert_eq!(game.len(), 2, "it stays, to be measured");
+    }
+
+    #[test]
+    fn too_many_bots_for_the_board_dont_start() {
+        let rules = Rules {
+            width: 10,
+            height: 8,
+            bots: 7,
+            ..Rules::default()
+        };
+        assert!(SoloGame::with_seed(rules, 1).is_err());
     }
 }

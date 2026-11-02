@@ -806,7 +806,11 @@ impl App {
                 Key::Enter | Key::Char(' ') if kind == RoomKind::Match => {
                     effects.push(Effect::LeaveRoom);
                     self.leave_room();
-                    self.choose(HomeItem::QuickPlay, effects);
+                    let game = self.ui().id();
+                    match self.online.pool.filter(|_| self.ui().again_in_same_pool()) {
+                        Some(pool) => self.queue(game, pool, effects),
+                        None => self.choose(HomeItem::QuickPlay, effects),
+                    }
                     return;
                 }
                 Key::Esc | Key::Char('q') => true,

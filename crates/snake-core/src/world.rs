@@ -11,7 +11,7 @@ use rand::{RngExt, SeedableRng};
 use crate::board;
 use crate::config::Rules;
 use crate::geom::{Direction, Point, wrap_next};
-use crate::guns::{BEAM_SHOWN, BULLET_SPEED, Beam, Bullet, Gun, GunKind, Held, Hit, next_cell};
+use crate::guns::{BEAM_SHOWN, Beam, Bullet, Gun, GunKind, Held, Hit, next_cell};
 use crate::snake::{DeathCause, Snake};
 use crate::spawn;
 use crate::view::{MatchView, SnakeView};
@@ -89,6 +89,9 @@ pub struct World {
     /// Whether dead snakes turn into food. Otherwise they stay where they
     /// died, as the single-player game-over screen shows.
     pub corpses_to_food: bool,
+    /// A snake that stays where it died even so: the player's, in single
+    /// player against bots.
+    pub keeps_body: Option<u8>,
     /// Whether each food spawn drops one item per two living snakes, rather
     /// than one.
     pub scale_food: bool,
@@ -154,6 +157,7 @@ impl World {
             next_gun: None,
             free_cells,
             corpses_to_food: false,
+            keeps_body: None,
             scale_food: false,
             rng,
         }
@@ -463,12 +467,13 @@ impl World {
         }
     }
 
-    /// Moves a bullet up to [`BULLET_SPEED`] cells, checking first the cell
+    /// Moves a bullet up to the rules' bullet speed in cells, checking first the cell
     /// it's on if `here`, since a head may have moved into it. It stops at a
     /// wall, at the board's edge, or at the first snake it hits; otherwise
     /// it flies on next step.
     fn fly(&mut self, mut bullet: Bullet, here: bool, hits: &mut Vec<(u8, usize, usize)>) {
-        let path = self.line_of_fire(bullet.pos, bullet.dir, BULLET_SPEED);
+        let speed = self.rules.bullet_speed.max(1) as usize;
+        let path = self.line_of_fire(bullet.pos, bullet.dir, speed);
         let checked = here
             .then_some(bullet.pos)
             .into_iter()
@@ -479,7 +484,7 @@ impl World {
                 return;
             }
         }
-        if path.len() < BULLET_SPEED {
+        if path.len() < speed {
             // It reached a wall or the edge.
             return;
         }
@@ -516,6 +521,9 @@ impl World {
 
     /// Replaces a dead snake's body with food, except where something else is.
     fn turn_into_food(&mut self, snake: usize) {
+        if self.keeps_body == Some(self.snakes[snake].id) {
+            return;
+        }
         let body = std::mem::take(&mut self.snakes[snake].body);
         self.cells_to_food(body);
     }

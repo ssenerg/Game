@@ -270,6 +270,13 @@ pub trait GameUi: Any + Send + Sync {
     /// why they can't yet.
     fn quick_play(&mut self, size: Size) -> Result<QuickStart, String>;
 
+    /// Whether Enter on a match's results waits again in the pool the
+    /// player came from, rather than opening quick play: for a game whose
+    /// choice of pool is made once and kept.
+    fn again_in_same_pool(&self) -> bool {
+        false
+    }
+
     /// One of its pools as the player knows it, such as chess's "5+3
     /// blitz", while they wait in it.
     fn pool_name(&self, pool: &str) -> Option<String> {

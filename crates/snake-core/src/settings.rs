@@ -13,6 +13,9 @@ pub enum NumFmt {
     Secs,
     SecsOrOff,
     Plus,
+    /// A count, or "none" for 0.
+    OrNone,
+    PerTick,
 }
 
 impl NumFmt {
@@ -29,6 +32,14 @@ impl NumFmt {
                 }
             }
             NumFmt::Plus => format!("+{v}"),
+            NumFmt::OrNone => {
+                if v == 0 {
+                    "none".into()
+                } else {
+                    v.to_string()
+                }
+            }
+            NumFmt::PerTick => format!("{v} cells a tick"),
         }
     }
 }
@@ -68,8 +79,7 @@ impl Section {
             Section::Board => "Board",
             Section::Food => "Food",
             Section::Gameplay => "Gameplay",
-            // Single player has nobody to shoot.
-            Section::Guns => "Guns (rooms)",
+            Section::Guns => "Guns",
             Section::Icons => "Icons",
             Section::Colors => "Colors",
         }
@@ -87,12 +97,13 @@ pub struct Setting {
 impl Setting {
     /// Whether a private room's host can change it in the lobby: every
     /// rule but the two multiplayer always overrides (see
-    /// `RoundSettings::new`). Icons and colors are each player's own.
+    /// `RoundSettings::new`), and single player's bots: rooms seat their
+    /// own. Icons and colors are each player's own.
     pub fn in_rooms(&self) -> bool {
         matches!(
             self.section,
             Section::Board | Section::Food | Section::Gameplay | Section::Guns
-        ) && !matches!(self.key, "move_timing" | "boost_duration_s")
+        ) && !matches!(self.key, "move_timing" | "boost_duration_s" | "bots")
     }
 }
 
@@ -315,6 +326,19 @@ pub const SETTINGS: &[Setting] = &[
         },
     },
     Setting {
+        label: "bots",
+        key: "bots",
+        section: Section::Gameplay,
+        kind: Kind::Num {
+            get: |c| c.rules.bots as u64,
+            set: |c, v| c.rules.bots = v as u8,
+            min: 0,
+            max: 7,
+            step: 1,
+            fmt: NumFmt::OrNone,
+        },
+    },
+    Setting {
         label: "guns",
         key: "guns",
         section: Section::Guns,
@@ -365,6 +389,19 @@ pub const SETTINGS: &[Setting] = &[
         },
     },
     Setting {
+        label: "bullet speed",
+        key: "bullet_speed",
+        section: Section::Guns,
+        kind: Kind::Num {
+            get: |c| c.rules.bullet_speed,
+            set: |c, v| c.rules.bullet_speed = v,
+            min: 2,
+            max: 6,
+            step: 1,
+            fmt: NumFmt::PerTick,
+        },
+    },
+    Setting {
         label: "food icon",
         key: "icon_food",
         section: Section::Icons,
@@ -381,6 +418,18 @@ pub const SETTINGS: &[Setting] = &[
         key: "icon_poison",
         section: Section::Icons,
         kind: Kind::Icon(IconSlot::Poison),
+    },
+    Setting {
+        label: "laser icon",
+        key: "icon_laser",
+        section: Section::Icons,
+        kind: Kind::Icon(IconSlot::Laser),
+    },
+    Setting {
+        label: "pistol icon",
+        key: "icon_pistol",
+        section: Section::Icons,
+        kind: Kind::Icon(IconSlot::Pistol),
     },
     Setting {
         label: "snake head",
@@ -423,6 +472,18 @@ pub const SETTINGS: &[Setting] = &[
         key: "color_bg",
         section: Section::Colors,
         kind: Kind::Color(ColorSlot::Background),
+    },
+    Setting {
+        label: "laser",
+        key: "color_laser",
+        section: Section::Colors,
+        kind: Kind::Color(ColorSlot::Laser),
+    },
+    Setting {
+        label: "pistol",
+        key: "color_pistol",
+        section: Section::Colors,
+        kind: Kind::Color(ColorSlot::Pistol),
     },
 ];
 
@@ -508,7 +569,8 @@ impl GameConfig {
     }
 
     /// Parses [`Self::to_saved_text`] output. Unknown keys and bad values are
-    /// skipped, leaving those settings at their defaults.
+    /// skipped, leaving those settings at their defaults. Guns come with a
+    /// bot, as [`Rules::bot_for_guns`] says.
     pub fn from_saved_text(text: &str) -> Self {
         let mut cfg = Self::default();
         for line in text.lines() {
@@ -519,6 +581,7 @@ impl GameConfig {
                 cfg.set_from_saved(i, value.trim());
             }
         }
+        cfg.rules.bot_for_guns();
         cfg
     }
 }
@@ -536,6 +599,8 @@ mod tests {
             .collect();
         assert!(in_rooms.contains(&"width") && in_rooms.contains(&"poison_ttl_s"));
         assert!(!in_rooms.contains(&"move_timing") && !in_rooms.contains(&"boost_duration_s"));
+        assert!(!in_rooms.contains(&"bots"), "rooms seat their own");
+        assert!(in_rooms.contains(&"guns") && in_rooms.contains(&"bullet_speed"));
         assert!(
             !in_rooms
                 .iter()

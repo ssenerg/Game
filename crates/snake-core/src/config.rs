@@ -26,8 +26,9 @@ pub fn color_name(idx: usize) -> &'static str {
     COLOR_NAMES[idx % COLOR_NAMES.len()]
 }
 
-/// Selectable icons for food items, as `(name, glyph)`. Only single-width
-/// characters — the board renders each cell as the glyph plus a space.
+/// Selectable icons for food and guns, as `(name, glyph)`. Only single-width
+/// characters — the board renders each cell as the glyph plus a space. New
+/// ones go last: settings keep icons by their place here.
 pub const GLYPHS: &[(&str, &str)] = &[
     ("dot", "●"),
     ("circle", "○"),
@@ -47,6 +48,8 @@ pub const GLYPHS: &[(&str, &str)] = &[
     ("dollar", "$"),
     ("hash", "#"),
     ("percent", "%"),
+    ("zigzag", "↯"),
+    ("gun", "⌐"),
 ];
 
 pub fn glyph_name(idx: usize) -> &'static str {
@@ -166,18 +169,24 @@ pub enum ColorSlot {
     Poison,
     Wall,
     Background,
+    /// A laser on the board, and its beam.
+    Laser,
+    /// A pistol on the board, and its bullets.
+    Pistol,
 }
 
-pub const COLOR_SLOTS: usize = 7;
+pub const COLOR_SLOTS: usize = 9;
 
 #[derive(Clone, Copy)]
 pub enum IconSlot {
     Food,
     SuperFood,
     Poison,
+    Laser,
+    Pistol,
 }
 
-pub const ICON_SLOTS: usize = 3;
+pub const ICON_SLOTS: usize = 5;
 
 impl IconSlot {
     /// The color slot this icon is drawn with, used for menu previews.
@@ -186,6 +195,8 @@ impl IconSlot {
             IconSlot::Food => ColorSlot::Food,
             IconSlot::SuperFood => ColorSlot::SuperFood,
             IconSlot::Poison => ColorSlot::Poison,
+            IconSlot::Laser => ColorSlot::Laser,
+            IconSlot::Pistol => ColorSlot::Pistol,
         }
     }
 }
@@ -226,6 +237,10 @@ pub struct Rules {
     pub gun_ttl_s: u64,
     /// How long a snake that takes a gun has to fire it.
     pub gun_hold_s: u64,
+    /// Cells a pistol's bullet moves each tick; snakes move one.
+    pub bullet_speed: u64,
+    /// Bots playing against you in single player. Rooms seat theirs apart.
+    pub bots: u8,
 }
 
 impl Default for Rules {
@@ -251,6 +266,8 @@ impl Default for Rules {
             gun_interval_s: 10,
             gun_ttl_s: 8,
             gun_hold_s: 5,
+            bullet_speed: 3,
+            bots: 0,
         }
     }
 }
@@ -282,7 +299,35 @@ impl Rules {
         if self.move_timing == MoveTiming::OnTick {
             key.push_str(" timing:tick");
         }
+        if self.bots > 0 {
+            key.push_str(&format!(" bots:{}", self.bots));
+            if self.guns {
+                key.push_str(&format!(
+                    " guns:{}/{}/{}/{}",
+                    self.gun_interval_s, self.gun_ttl_s, self.gun_hold_s, self.bullet_speed
+                ));
+            }
+        }
         key
+    }
+
+    /// Single player's guns need someone to shoot: with guns on, at least
+    /// one bot plays.
+    pub fn bot_for_guns(&mut self) {
+        if self.guns && self.bots == 0 {
+            self.bots = 1;
+        }
+    }
+
+    /// These rules as single player plays them. With bots, every snake
+    /// moves on the tick and super food gives no boost, as in rooms.
+    pub fn for_solo(mut self) -> Rules {
+        self.bot_for_guns();
+        if self.bots > 0 {
+            self.move_timing = MoveTiming::OnTick;
+            self.boost_duration_s = 0;
+        }
+        self
     }
 }
 
@@ -297,10 +342,11 @@ pub struct Theme {
 impl Default for Theme {
     fn default() -> Self {
         Self {
-            // food ●, super food ★, poison ✖
-            icons: [0, 4, 11],
-            // head, body, food, super food, poison, wall, background
-            colors: [3, 2, 1, 5, 8, 13, 15],
+            // food ●, super food ★, poison ✖, laser ↯, pistol ⌐
+            icons: [0, 4, 11, 18, 19],
+            // head, body, food, super food, poison, wall, background, laser,
+            // pistol
+            colors: [3, 2, 1, 5, 8, 13, 15, 11, 12],
         }
     }
 }
@@ -345,5 +391,32 @@ mod tests {
             on_tick.record_key(),
             Rules::default().record_key() + " timing:tick"
         );
+    }
+
+    #[test]
+    fn games_against_bots_have_their_own_records() {
+        let guns = Rules {
+            guns: true,
+            ..Rules::default()
+        };
+        assert_eq!(
+            guns.record_key(),
+            Rules::default().record_key(),
+            "alone, there are no guns to play with"
+        );
+        let solo = guns.for_solo();
+        assert_eq!(solo.bots, 1, "guns need someone to shoot");
+        assert_eq!(
+            (solo.move_timing, solo.boost_duration_s),
+            (MoveTiming::OnTick, 0),
+            "as rooms play"
+        );
+        assert!(
+            solo.record_key()
+                .ends_with(" timing:tick bots:1 guns:10/8/5/3"),
+            "{}",
+            solo.record_key()
+        );
+        assert_eq!(Rules::default().for_solo(), Rules::default());
     }
 }
