@@ -137,7 +137,11 @@ fn stats_line(app: &SnakeUi, game: &SoloGame, board_w: u16) -> Line<'static> {
     if game.rules().bots > 0 {
         let left = game.bots_left();
         let s = if left == 1 { "" } else { "s" };
-        line.insert(0, Span::styled(format!(" {left} bot{s} ·"), dim));
+        let level = game.rules().bot_level;
+        line.insert(
+            0,
+            Span::styled(format!(" {left} bot{s} at level {level} ·"), dim),
+        );
     }
     Line::from(line)
 }

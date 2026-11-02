@@ -105,6 +105,14 @@ gives no speed boost.
   bodies, poison and dead ends. Bots are named after snakes (Viper, Cobra,
   and so on), and accounts can't take those names. Once every person's snake
   is out, the round ends: the longest bot left wins.
+- **Bot levels.** Bots play at the room's bot level, from 1 to 5. A private
+  room starts at the host's own setting (3 unless they changed it), which
+  the host can change in the room's rules; a quick-play match against bots
+  plays at 3. The lower the level, the longer a bot takes to aim, so a head
+  crossing its line gets past and only the body behind is hit. Lower levels
+  also fire at nothing and throw wide now and then, and turn the wrong way
+  at times; the lowest two don't see dead ends coming. At 5 a bot fires the
+  moment it can.
 - **Guns.** With guns on, in the Guns queue or a room whose host turns them
   on, a gun appears on the board every 10 seconds and stays 8 seconds if
   nobody takes it. Drive your head onto it to take it; you then have 5
@@ -410,8 +418,10 @@ cd /opt/apps/snaketui && sudo -u deploy sh -c 'docker image tag snaketui:previou
 **Against bots.** Set **bots** in the settings to play up to 7 bots on your
 board. They play as in rooms: every snake moves on the tick, and super food
 gives no boost. Turn **guns** on too, and guns appear as in rooms (see
-Multiplayer); guns always bring at least one bot. The game ends when your
-snake does, and games against bots keep their own records.
+Multiplayer); guns always bring at least one bot. Set **bot level** for how
+well they play (see Multiplayer). The game ends when your snake does, or in
+a win once every bot is out. Games against bots keep their own records, for
+each level.
 
 If the terminal gets too small to show the whole board, the game pauses until
 you make the window bigger again and resume.
@@ -452,6 +462,7 @@ round with guns. Elsewhere, and through tmux, press `f` again to throw.
 | super food growth | Length gained from super food |
 | super food speed boost | Duration of the 2× speed boost (`off` disables) |
 | bots | Bots playing against you in single player (`none` for a game alone) |
+| bot level | How well bots play, from 1 to 5, in single player and in rooms you make |
 | guns | Guns, against bots and in rooms you make; with how often one spawns, its lifetime, the time to use one, and the bullet speed; and for thrown items, how often one spawns, its lifetime, the grenade's blast radius, how long a flashbang lasts, and the smoke's radius and how long it lasts |
 | food / super food / poison / laser / pistol / grenade / flashbang / smoke icon | Glyph drawn on the board (dot, star, heart, cross, zigzag, gun, circled plus, …) |
 | colors | Per-cell-type colors (head, body, food, super food, poison, walls, background, laser, pistol, grenade, flashbang, smoke) |

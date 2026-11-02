@@ -540,6 +540,17 @@ impl GameUi for SnakeUi {
         if rules.guns {
             line.push(Span::styled(" · guns", dim));
         }
+        if room
+            .shell()
+            .seats
+            .iter()
+            .any(|s| game_api::is_bot(s.who.id))
+        {
+            line.push(Span::styled(
+                format!(" · bots at level {}", rules.bot_level),
+                dim,
+            ));
+        }
         line
     }
 

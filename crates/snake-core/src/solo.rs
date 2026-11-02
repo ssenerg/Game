@@ -1,7 +1,7 @@
 //! Single player: one snake, instant or on-tick moves, a speed boost from
 //! super food, and a win for filling the whole board. Or against bots, by
 //! rooms' rules: every snake on the tick, no boost, and guns if they're on.
-//! The game ends when your snake does.
+//! The game ends when your snake does, or in a win once every bot is out.
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -24,6 +24,8 @@ pub enum GameOverReason {
     Shot,
     Poisoned,
     MaxLength,
+    /// Every bot is out, and the player's snake isn't.
+    BeatBots,
 }
 
 pub struct SoloGame {
@@ -170,6 +172,10 @@ impl SoloGame {
             });
             return;
         }
+        if self.world.rules.bots > 0 && self.bots_left() == 0 {
+            self.over = Some(GameOverReason::BeatBots);
+            return;
+        }
         let boost = self.world.rules.boost_duration_s;
         if boost > 0 && outcome.eaten.iter().any(|&(_, k)| k == FoodKind::Super) {
             self.boost_until = self.world.clock + Duration::from_secs(boost);
@@ -248,6 +254,24 @@ mod tests {
             assert!(!game.started, "{timing:?}");
             assert_eq!(head(&game), (5, 5));
         }
+    }
+
+    #[test]
+    fn outlasting_every_bot_wins() {
+        let rules = Rules {
+            bots: 2,
+            ..Rules::default()
+        };
+        let mut game = SoloGame::with_seed(rules, 1).unwrap();
+        game.started = true;
+        let tick = game.tick_interval();
+        game.world.snakes[1].death = Some(DeathCause::Wall);
+        game.advance(tick);
+        assert_eq!(game.over, None, "one bot is left");
+        game.world.snakes[2].death = Some(DeathCause::Wall);
+        game.advance(tick);
+        assert_eq!(game.over, Some(GameOverReason::BeatBots));
+        assert!(game.snake().alive());
     }
 
     #[test]

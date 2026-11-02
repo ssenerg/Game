@@ -45,6 +45,8 @@ pub struct Snake {
     pub(crate) plan: Option<VecDeque<Direction>>,
     /// How far a bot means its throw's mark to go before letting go.
     pub(crate) aim_for: Option<usize>,
+    /// Steps in a row a bot has had a target for what it holds.
+    pub(crate) sighted: u8,
 }
 
 impl Snake {
@@ -62,6 +64,7 @@ impl Snake {
             blind_until: Duration::ZERO,
             plan: None,
             aim_for: None,
+            sighted: 0,
         }
     }
 

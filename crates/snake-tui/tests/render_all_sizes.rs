@@ -177,6 +177,7 @@ fn screens(rules: &Rules) -> Vec<App> {
         GameOverReason::Shot,
         GameOverReason::Poisoned,
         GameOverReason::MaxLength,
+        GameOverReason::BeatBots,
     ] {
         for new_record in [false, true] {
             let mut app = new_app(SnakeScreen::GameOver { new_record });

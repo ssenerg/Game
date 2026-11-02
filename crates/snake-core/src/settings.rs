@@ -15,6 +15,8 @@ pub enum NumFmt {
     Plus,
     /// A count, or "none" for 0.
     OrNone,
+    /// A bot's level, out of the most.
+    Level,
     PerTick,
     Cells,
 }
@@ -41,6 +43,7 @@ impl NumFmt {
                 }
             }
             NumFmt::PerTick => format!("{v} cells a tick"),
+            NumFmt::Level => format!("{v} of {}", crate::bot::LEVELS.end()),
             NumFmt::Cells => format!("{v} cells"),
         }
     }
@@ -338,6 +341,19 @@ pub const SETTINGS: &[Setting] = &[
             max: 7,
             step: 1,
             fmt: NumFmt::OrNone,
+        },
+    },
+    Setting {
+        label: "bot level",
+        key: "bot_level",
+        section: Section::Gameplay,
+        kind: Kind::Num {
+            get: |c| c.rules.bot_level as u64,
+            set: |c, v| c.rules.bot_level = v as u8,
+            min: *crate::bot::LEVELS.start() as u64,
+            max: *crate::bot::LEVELS.end() as u64,
+            step: 1,
+            fmt: NumFmt::Level,
         },
     },
     Setting {

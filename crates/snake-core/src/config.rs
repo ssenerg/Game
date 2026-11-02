@@ -255,6 +255,9 @@ pub struct Rules {
     pub bullet_speed: u64,
     /// Bots playing against you in single player. Rooms seat theirs apart.
     pub bots: u8,
+    /// How well bots play, in single player and in rooms: one of
+    /// [`crate::bot::LEVELS`].
+    pub bot_level: u8,
     /// How often a thrown item appears, with guns on; 0 for never.
     pub thrown_interval_s: u64,
     /// How long it stays on the board if nobody takes it.
@@ -294,6 +297,7 @@ impl Default for Rules {
             gun_hold_s: 5,
             bullet_speed: 3,
             bots: 0,
+            bot_level: 3,
             thrown_interval_s: 15,
             thrown_ttl_s: 8,
             grenade_radius: 2,
@@ -333,6 +337,10 @@ impl Rules {
         }
         if self.bots > 0 {
             key.push_str(&format!(" bots:{}", self.bots));
+            // Bots played as well as they could before they had levels.
+            if self.bot_level != *crate::bot::LEVELS.end() {
+                key.push_str(&format!(" level:{}", self.bot_level));
+            }
             if self.guns {
                 key.push_str(&format!(
                     " guns:{}/{}/{}/{}",
@@ -457,10 +465,19 @@ mod tests {
         );
         assert!(
             solo.record_key().ends_with(
-                " timing:tick bots:1 guns:10/8/5/3 thrown:15/8 blast:2 flash:3 smoke:3/8"
+                " timing:tick bots:1 level:3 guns:10/8/5/3 thrown:15/8 blast:2 flash:3 smoke:3/8"
             ),
             "{}",
             solo.record_key()
+        );
+        let best = Rules {
+            bot_level: 5,
+            ..solo.clone()
+        };
+        assert_eq!(
+            best.record_key(),
+            solo.record_key().replace(" level:3", ""),
+            "bots at their best keep the records from before levels"
         );
         assert_eq!(Rules::default().for_solo(), Rules::default());
     }

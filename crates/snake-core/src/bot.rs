@@ -6,16 +6,59 @@
 //! go once its mark gets where it aims. It can't see into smoke. Blinded
 //! by a flashbang, it follows a few moves it planned on the board as it
 //! last saw it, then goes straight.
+//!
+//! Bots play at one of five [`LEVELS`]. The lower ones take a step or more
+//! to aim, so a head crossing their line gets past and only its body is
+//! hit; they fire at nothing and throw wide now and then; they turn any
+//! way at times, safe or not; and the lowest don't see dead ends coming.
 
 use std::collections::{HashSet, VecDeque};
+use std::ops::RangeInclusive;
 
 use crate::geom::{Direction, Point, wrap_next};
 use crate::guns::{Item, disc, next_cell};
 use crate::world::{FoodKind, World};
 
+/// How well bots play: 1 is the weakest, and 5 plays as well as it can.
+pub const LEVELS: RangeInclusive<u8> = 1..=5;
+
 /// Further than this, a pistol's bullet would likely miss a moving snake,
 /// so bots hold their fire.
 const PISTOL_RANGE: usize = 12;
+
+/// How one level plays. Chances are in thousandths, each step.
+struct Style {
+    /// Steps a target has to stay in its line before it fires, or throws.
+    aim: u8,
+    /// That it fires its gun at nothing.
+    wild: u32,
+    /// That it turns any way at all, safe or not.
+    stray: u32,
+    /// Whether it keeps out of moves that would box it in.
+    looks_ahead: bool,
+    /// How many cells short or long its throws may land.
+    misthrow: usize,
+}
+
+impl Style {
+    fn of(level: u8) -> Style {
+        let (aim, wild, stray, looks_ahead, misthrow) =
+            match level.clamp(*LEVELS.start(), *LEVELS.end()) {
+                1 => (3, 20, 20, false, 3),
+                2 => (2, 10, 10, false, 2),
+                3 => (1, 5, 4, true, 1),
+                4 => (1, 0, 1, true, 1),
+                _ => (0, 0, 0, true, 0),
+            };
+        Style {
+            aim,
+            wild,
+            stray,
+            looks_ahead,
+            misthrow,
+        }
+    }
+}
 
 const DIRECTIONS: [Direction; 4] = [
     Direction::Up,
@@ -41,9 +84,19 @@ pub fn drive(world: &mut World, id: u8) {
         return;
     }
     world.snakes[i].plan = None;
-    let Some(dir) = choose(world, id) else {
+    let style = Style::of(world.rules.bot_level);
+    let Some(mut dir) = choose(world, id) else {
         return;
     };
+    if world.chance(style.stray) {
+        let me = &world.snakes[i];
+        let (w, h) = (world.width, world.height);
+        let ways: Vec<Direction> = DIRECTIONS
+            .into_iter()
+            .filter(|&d| !me.reverses(d, w, h))
+            .collect();
+        dir = ways[world.roll(0..=ways.len() - 1)];
+    }
     world.steer(id, dir);
     let snake = &world.snakes[i];
     if let Some(throw) = &snake.throw {
@@ -53,17 +106,31 @@ pub fn drive(world: &mut World, id: u8) {
         }
         return;
     }
-    match snake.held.map(|h| h.kind) {
+    let held = snake.held.map(|h| h.kind);
+    // Where a throw would go, or whether a shot would hit.
+    let (target, throw) = match held {
         Some(kind) if kind.thrown() => {
-            if let Some(d) = aim(world, id, dir, kind) {
-                world.snakes[i].aim_for = Some(d);
-                world.fire(id);
-            }
+            let d = aim(world, id, dir, kind);
+            (d.is_some(), d)
         }
-        Some(_) if fires(world, id, dir) => {
+        Some(_) => (fires(world, id, dir), None),
+        None => (false, None),
+    };
+    let sighted = &mut world.snakes[i].sighted;
+    *sighted = if target { sighted.saturating_add(1) } else { 0 };
+    let ready = *sighted > style.aim;
+    if let Some(d) = throw {
+        if ready {
+            let miss = style.misthrow;
+            let d = match miss {
+                0 => d,
+                _ => (d + world.roll(0..=2 * miss)).saturating_sub(miss).max(1),
+            };
+            world.snakes[i].aim_for = Some(d);
             world.fire(id);
         }
-        _ => {}
+    } else if held.is_some_and(|k| !k.thrown()) && (ready || world.chance(style.wild)) {
+        world.fire(id);
     }
 }
 
@@ -123,10 +190,12 @@ fn aim(world: &World, id: u8, dir: Direction, kind: Item) -> Option<usize> {
     }
 }
 
-/// Which way snake `id` should go next on `world`; `None` if it's dead.
-/// Under smoke it sees only walls and its own body.
+/// Which way snake `id` should go next on `world`, as well as its level
+/// sees; `None` if it's dead. Under smoke it sees only walls and its own
+/// body.
 pub fn choose(world: &World, id: u8) -> Option<Direction> {
     let me = world.snakes.iter().find(|s| s.id == id && s.alive())?;
+    let style = Style::of(world.rules.bot_level);
     let (w, h) = (world.width, world.height);
     let at = |p: Point| p.y as usize * w as usize + p.x as usize;
     let seen = |p: Point| !world.smoky(p);
@@ -195,7 +264,7 @@ pub fn choose(world: &World, id: u8) -> Option<Direction> {
             // Most important first.
             (
                 safe,
-                room >= me.len(),
+                !style.looks_ahead || room >= me.len(),
                 !contested[at(next)],
                 std::cmp::Reverse(to_food.unwrap_or(usize::MAX)),
                 room,
@@ -277,8 +346,18 @@ mod tests {
     }
 
     /// A walled 12×10 board with one snake heading right from (5, 5), and
-    /// no food unless a test adds some.
+    /// no food unless a test adds some. Bots on it play their best.
     fn board(rules: Rules) -> World {
+        board_seeded(
+            Rules {
+                bot_level: *LEVELS.end(),
+                ..rules
+            },
+            1,
+        )
+    }
+
+    fn board_seeded(rules: Rules, seed: u64) -> World {
         let rules = Rules {
             width: 12,
             height: 10,
@@ -287,7 +366,7 @@ mod tests {
             poison_interval_s: 0,
             ..rules
         };
-        let mut world = World::with_players(rules, 1, 2).unwrap();
+        let mut world = World::with_players(rules, seed, 2).unwrap();
         world.snakes.truncate(1);
         world.snakes[0] = Snake::new(
             0,
@@ -489,6 +568,84 @@ mod tests {
         }
         assert!(hits > 0, "no bot ever hit anyone");
         assert!(thrown > 0, "no bot ever threw anything");
+    }
+
+    #[test]
+    fn lower_levels_take_longer_to_aim() {
+        use crate::guns::Held;
+
+        // A bot with a laser, and a snake across its line that stays: the
+        // turns it takes to fire.
+        let aiming = |bot_level| {
+            let rules = Rules {
+                guns: true,
+                bot_level,
+                ..Rules::default()
+            };
+            let mut world = board_seeded(rules, 1);
+            let column = (1..=5).rev().map(|y| p(9, y)).collect();
+            world.snakes.push(Snake::new(1, column, Direction::Down));
+            world.snakes[0].held = Some(Held {
+                kind: Item::Laser,
+                until: std::time::Duration::from_secs(60),
+            });
+            (1..=10)
+                .find(|_| {
+                    drive(&mut world, 0);
+                    world.snakes[0].firing
+                })
+                .expect("it fires in the end")
+        };
+        let turns: Vec<usize> = LEVELS.rev().map(aiming).collect();
+        assert_eq!(turns, [1, 2, 2, 3, 4], "from the best down");
+
+        // Its line clear again, it starts over.
+        let mut world = board_seeded(
+            Rules {
+                guns: true,
+                bot_level: 3,
+                ..Rules::default()
+            },
+            1,
+        );
+        world.snakes[0].held = Some(Held {
+            kind: Item::Laser,
+            until: std::time::Duration::from_secs(60),
+        });
+        world.snakes[0].sighted = 1;
+        drive(&mut world, 0);
+        assert_eq!(world.snakes[0].sighted, 0);
+    }
+
+    #[test]
+    fn lower_levels_last_less_long() {
+        // Steps until the first of four bots dies, over 8 boards.
+        let lasting = |bot_level| -> usize {
+            (0..8)
+                .map(|seed| {
+                    let rules = Rules {
+                        bot_level,
+                        ..crate::round::quick_rules()
+                    };
+                    let mut world = World::with_players(rules, seed, 4).unwrap();
+                    let mut steps = 0;
+                    while world.alive() == 4 && steps < 2000 {
+                        world.advance_clock(std::time::Duration::from_millis(150));
+                        for id in 0..4 {
+                            drive(&mut world, id);
+                        }
+                        world.step();
+                        steps += 1;
+                    }
+                    steps
+                })
+                .sum()
+        };
+        let (weakest, best) = (lasting(1), lasting(5));
+        assert!(
+            weakest * 2 < best,
+            "level 1 lasted {weakest} steps, 5 {best}"
+        );
     }
 
     #[test]

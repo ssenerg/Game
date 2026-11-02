@@ -408,7 +408,11 @@ const RELEASES_OFF: &[u8] = b"\x1b[<u";
 /// From the single-player settings into a game with guns.
 async fn game_with_guns(p: &mut Player) {
     // Down to the guns row, and on.
-    for _ in 0..17 {
+    let row = snake_core::settings::SETTINGS
+        .iter()
+        .position(|s| s.key == "guns")
+        .expect("a guns row");
+    for _ in 0..row {
         p.send(b"\x1b[B").await;
     }
     p.send(b"\x1b[C").await;

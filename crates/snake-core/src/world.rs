@@ -602,6 +602,17 @@ impl World {
         self.rng.random_range(range)
     }
 
+    /// Whether something with a chance of `per_mille` thousandths happens,
+    /// by the world's own random numbers. A sure thing, or an impossible
+    /// one, draws none.
+    pub(crate) fn chance(&mut self, per_mille: u32) -> bool {
+        match per_mille {
+            0 => false,
+            1000.. => true,
+            p => self.rng.random_range(0..1000) < p,
+        }
+    }
+
     /// Whether smoke hides the cell at `p`.
     pub fn smoky(&self, p: Point) -> bool {
         self.smoke.iter().any(|c| c.cells.contains(&p))

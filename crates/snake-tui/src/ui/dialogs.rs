@@ -94,9 +94,13 @@ pub fn draw_game_over(frame: &mut Frame, app: &SnakeUi, new_record: bool) {
         Some(GameOverReason::Shot) => ("A bot shot you!", Color::LightRed),
         Some(GameOverReason::Poisoned) => ("✖ You ate poison!", Color::LightMagenta),
         Some(GameOverReason::MaxLength) => ("★ Board complete — you win! ★", Color::LightGreen),
+        Some(GameOverReason::BeatBots) => ("★ You outlasted every bot! ★", Color::LightGreen),
         None => ("", Color::White),
     };
-    let title = if matches!(game.over, Some(GameOverReason::MaxLength)) {
+    let title = if matches!(
+        game.over,
+        Some(GameOverReason::MaxLength | GameOverReason::BeatBots)
+    ) {
         " YOU WIN "
     } else {
         " GAME OVER "
