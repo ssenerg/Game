@@ -201,8 +201,29 @@ fn f_fires_while_the_snake_plays() {
     assert_eq!(app.handle(Key::Char('F')), [fire()]);
 }
 
+#[test]
+fn a_held_f_counts_once_where_the_terminal_cant_say_it_was_let_go() {
+    // Without guns, letting go means nothing.
+    let mut app = online();
+    app.screen = Screen::Finding;
+    app.enter_room(1, matched_view());
+    assert!(!app.releases_unheard());
+    // With guns, it throws: a terminal that can't say so has repeats taken
+    // for one press, and one that can has nothing to take.
+    let mut app = online();
+    app.screen = Screen::Finding;
+    app.enter_room(1, matched_view_of(snake_core::round::quick_guns_rules()));
+    assert!(app.releases_unheard() && !app.wants_key_releases());
+    app.hear_key_releases();
+    assert!(!app.releases_unheard() && app.wants_key_releases());
+}
+
 fn matched_view() -> Arc<RoomView> {
-    let settings = RoomSettings::new(quick_rules(), RoomKind::Match).unwrap();
+    matched_view_of(quick_rules())
+}
+
+fn matched_view_of(rules: Rules) -> Arc<RoomView> {
+    let settings = RoomSettings::new(rules, RoomKind::Match).unwrap();
     let players = [1, 2]
         .map(|id| Entrant {
             id,

@@ -5,7 +5,7 @@ use std::time::Instant;
 use anyhow::Result;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use shell_tui::{Ctx, GameFx, GameUi, Key, Next};
+use shell_tui::{Ctx, GameFx, GameUi, Key, Next, Repeats};
 use snake_tui::SnakeUi;
 
 /// The app's key for a terminal key press, or `None` for keys it ignores.
@@ -42,6 +42,8 @@ fn apply(snake: &SnakeUi, fx: Vec<GameFx>) {
 fn run(terminal: &mut DefaultTerminal) -> Result<()> {
     let mut snake = SnakeUi::new(persist::load_config(), persist::load_records());
     let mut last_frame = Instant::now();
+    // The local game never hears keys let go: a held `f` just repeats.
+    let mut repeats = Repeats::default();
 
     loop {
         let ctx = Ctx::alone(terminal.size()?);
@@ -58,6 +60,9 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
                         return Ok(());
                     }
                     if let Some(key) = to_key(key) {
+                        if snake.wants_key_releases() && repeats.repeated(key, Instant::now()) {
+                            continue;
+                        }
                         let reply = snake.key(key, &ctx);
                         apply(&snake, reply.fx);
                         // Home is the way out on its own.

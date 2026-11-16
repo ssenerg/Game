@@ -17,7 +17,7 @@ use ratatui::{Terminal, TerminalOptions, Viewport};
 use russh::ChannelId;
 use russh::server::Handle;
 use shell_tui::online::{HomeItem, QueueRegion};
-use shell_tui::{App, Effect, GameFx, Key, Saved, Screen, ui};
+use shell_tui::{App, Effect, GameFx, Key, Repeats, Saved, Screen, ui};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -408,6 +408,8 @@ pub struct SessionActor {
     parser: KeyParser,
     /// Keys this player may still send.
     keys: Budget,
+    /// A letter held down on a terminal that can't say when it's let go.
+    repeats: Repeats,
     /// Actions this player may still take.
     actions: Budget,
     loads: Loads,
@@ -513,6 +515,7 @@ impl SessionActor {
             releases: false,
             parser: KeyParser::default(),
             keys: Budget::new(KEY_BURST, KEYS_PER_SEC, now),
+            repeats: Repeats::default(),
             actions: Budget::new(ACTION_BURST, ACTIONS_PER_SEC, now),
             loads: Loads::default(),
             unsaved: Unsaved::default(),
@@ -793,8 +796,13 @@ impl SessionActor {
         let Some(app) = self.app.as_mut() else { return };
         let was_playing = app.playing_alone() || app.screen == Screen::Finding;
         let mut effects = Vec::new();
+        let (repeats, now) = (&mut self.repeats, Instant::now());
         let handled = catch_unwind(AssertUnwindSafe(|| {
             for key in keys {
+                // A held letter's repeats, where letting go of it matters.
+                if app.releases_unheard() && repeats.repeated(key, now) {
+                    continue;
+                }
                 let fx = app.handle(key);
                 let quit = fx.contains(&Effect::Quit);
                 effects.extend(fx);

@@ -768,6 +768,37 @@ mod tests {
     }
 
     #[test]
+    fn a_held_f_on_a_terminal_that_cant_say_it_was_let_go_is_one_press() {
+        use shell_tui::Repeats;
+        use std::time::Instant;
+
+        let mut ui = armed(snake_core::guns::Item::Grenade);
+        let (start, mut repeats) = (Instant::now(), Repeats::default());
+        // As the local game and the server pass keys on: a held `f`'s
+        // repeats are dropped.
+        let mut press = |ui: &mut SnakeUi, ms| {
+            let at = start + Duration::from_millis(ms);
+            if !(ui.wants_key_releases() && repeats.repeated(Key::Char('f'), at)) {
+                key(ui, Key::Char('f'));
+            }
+        };
+        let throw = |ui: &SnakeUi| ui.game.as_ref().unwrap().snake().throw.clone();
+        // Pressed a little long at a quick key-repeat setting.
+        for ms in [0, 180, 210] {
+            press(&mut ui, ms);
+        }
+        assert!(
+            throw(&ui).is_some_and(|t| !t.released),
+            "aiming, not thrown"
+        );
+        step(&mut ui);
+        step(&mut ui);
+        // Pressed again on purpose: now it goes.
+        press(&mut ui, 1200);
+        assert!(throw(&ui).is_some_and(|t| t.released));
+    }
+
+    #[test]
     fn bots_that_dont_fit_say_so() {
         let mut ui = snake();
         ui.cfg.rules = Rules {

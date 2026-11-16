@@ -20,4 +20,4 @@ pub use game::{
     BotWords, Ctx, GameFx, GameUi, Next, Picture, Pictures, Placement, QuickPlay, QuickStart,
     Reply, Saved,
 };
-pub use key::{Key, Mouse, MouseKind};
+pub use key::{Key, Mouse, MouseKind, REPEAT_WINDOW, Repeats};

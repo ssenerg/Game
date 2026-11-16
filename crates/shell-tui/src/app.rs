@@ -310,6 +310,17 @@ impl App {
             )
     }
 
+    /// Whether what shows now would hear keys let go, on a terminal that
+    /// can't say so: there a held key repeats instead, and repeats are
+    /// taken for one press (see [`crate::Repeats`]).
+    pub fn releases_unheard(&self) -> bool {
+        !self.key_releases
+            && self.showing_wants(
+                |game| game.wants_key_releases(),
+                |game, room| game.room_wants_key_releases(room),
+            )
+    }
+
     /// What the game showing now says, by `screens` for its own screens or
     /// `rooms` for its room; `false` on the app's screens.
     fn showing_wants(

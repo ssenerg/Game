@@ -468,7 +468,11 @@ Online, in rooms and around them:
 Holding `f` to throw needs a terminal that says when a key is let go, by the
 kitty keyboard protocol, such as kitty, WezTerm, Ghostty, foot or Alacritty.
 The server asks each terminal, and turns the protocol on only while you play a
-round with guns. Elsewhere, and through tmux, press `f` again to throw.
+round with guns. Elsewhere, such as macOS's Terminal and through tmux,
+press `f` again to throw. There a key held down just repeats, so an `f`
+within 0.3 seconds of the last is taken for the same press: holding `f`,
+or a press a little long at a quick key-repeat setting, never throws at
+once.
 
 ### Config options
 
