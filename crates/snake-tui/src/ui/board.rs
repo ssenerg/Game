@@ -22,8 +22,9 @@ const BEAM_DOWN: [&str; 2] = ["┃", " "];
 const MARK: [&str; 2] = ["◎", " "];
 const BURST: [&str; 2] = ["✸", " "];
 const SMOKE: [&str; 2] = ["░", "░"];
-/// What a flashbang leaves its opponents to see.
-const FLASH: Color = Color::White;
+/// What a flashbang leaves its opponents to see: light gray, bright but
+/// easier on the eyes than white in a dark terminal.
+const FLASH: Color = Color::Gray;
 
 /// How an item shows in this player's theme, on the board and beside it.
 /// Its shots, marks, blasts and clouds take its color.
@@ -112,8 +113,11 @@ pub struct BoardWidget<'a> {
     pub origin: Point,
     /// Per snake id. Without it, every snake gets the theme's colors.
     pub looks: Option<&'a [SnakeLook]>,
-    /// A flashbang blinds the player: all they see is white.
+    /// A flashbang blinds the player: all they see is light gray.
     pub blind: bool,
+    /// The player's own snake, whose head shows through smoke, so they
+    /// always know where they are. Everything else under it stays hidden.
+    pub me: Option<u8>,
 }
 
 impl<'a> BoardWidget<'a> {
@@ -124,6 +128,7 @@ impl<'a> BoardWidget<'a> {
             origin: Point { x: 0, y: 0 },
             looks: None,
             blind: false,
+            me: None,
         }
     }
 }
@@ -136,6 +141,7 @@ impl Widget for BoardWidget<'_> {
             origin,
             looks,
             blind,
+            me,
         } = self;
         let bg = theme_color(theme, ColorSlot::Background);
         let mut paint = |p: Point, text: [&str; 2], style: Style| {
@@ -234,25 +240,31 @@ impl Widget for BoardWidget<'_> {
                 plain(item_look(theme, kind).1).add_modifier(Modifier::BOLD),
             );
         }
-        for snake in &view.snakes {
-            let Some(&p) = snake.body.first() else {
-                continue;
-            };
+        // How a snake's head is drawn, and where.
+        let head = |snake: &SnakeView| {
+            let p = *snake.body.first()?;
             let look = look(snake.id);
-            match look.number {
+            Some(match look.number {
                 Some(n) => {
                     let style = Style::default()
                         .fg(digit_on(look.head))
                         .bg(look.head)
                         .add_modifier(Modifier::BOLD);
-                    paint(p, [DIGITS[n as usize % 10], " "], style);
+                    (p, [DIGITS[n as usize % 10], " "], style)
                 }
-                None => paint(p, BLOCK, plain(look.head)),
-            }
+                None => (p, BLOCK, plain(look.head)),
+            })
+        };
+        for (p, text, style) in view.snakes.iter().filter_map(head) {
+            paint(p, text, style);
         }
         let smoke = plain(item_look(theme, Item::Smoke).1);
         for &p in &view.smoke {
             paint(p, SMOKE, smoke);
+        }
+        let mine = view.snakes.iter().find(|s| Some(s.id) == me && s.alive);
+        if let Some((p, text, style)) = mine.and_then(head) {
+            paint(p, text, style);
         }
     }
 }

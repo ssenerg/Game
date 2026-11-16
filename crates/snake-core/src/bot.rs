@@ -16,7 +16,7 @@ use std::collections::{HashSet, VecDeque};
 use std::ops::RangeInclusive;
 
 use crate::geom::{Direction, Point, wrap_next};
-use crate::guns::{Item, disc, next_cell};
+use crate::guns::{Item, MIN_THROW, disc, next_cell};
 use crate::world::{FoodKind, World};
 
 /// How well bots play: 1 is the weakest, and 5 plays as well as it can.
@@ -124,7 +124,9 @@ pub fn drive(world: &mut World, id: u8) {
             let miss = style.misthrow;
             let d = match miss {
                 0 => d,
-                _ => (d + world.roll(0..=2 * miss)).saturating_sub(miss).max(1),
+                _ => (d + world.roll(0..=2 * miss))
+                    .saturating_sub(miss)
+                    .max(NEAREST),
             };
             world.snakes[i].aim_for = Some(d);
             world.fire(id);
@@ -150,8 +152,13 @@ fn remember(world: &World, id: u8, k: usize) -> VecDeque<Direction> {
     plan
 }
 
+/// The least a bot sends a throw's mark before letting go. The mark gains
+/// a cell a step on a head going its way, so by then it's [`MIN_THROW`]
+/// cells clear of the head and lands where it is.
+const NEAREST: usize = 2 * MIN_THROW as usize;
+
 /// How far snake `id`, about to go `dir`, would send a throw's mark before
-/// letting go of `kind`; `None` to keep it for now. A grenade waits for a
+/// letting go of `kind`, at least [`NEAREST`]; `None` to keep it for now. A grenade waits for a
 /// cell whose blast would reach another snake; a flashbang goes at once;
 /// smoke goes toward the nearest other snake in its line, or a little ahead.
 fn aim(world: &World, id: u8, dir: Direction, kind: Item) -> Option<usize> {
@@ -169,15 +176,17 @@ fn aim(world: &World, id: u8, dir: Direction, kind: Item) -> Option<usize> {
         Item::Grenade => {
             let r = world.rules.grenade_radius;
             line.iter()
-                .position(|&c| disc(c, r, w, h).iter().any(|p| others.contains(p)))
-                .map(|i| (i + 1).max(2))
+                .enumerate()
+                .skip(NEAREST - 1)
+                .find(|&(_, &c)| disc(c, r, w, h).iter().any(|p| others.contains(p)))
+                .map(|(i, _)| i + 1)
         }
-        Item::Flashbang => (line.len() >= 3).then_some(2),
+        Item::Flashbang => (line.len() > NEAREST).then_some(NEAREST),
         Item::Smoke => {
             let to = line
                 .iter()
                 .position(|p| others.contains(p))
-                .map_or(4, |i| i + 1);
+                .map_or(NEAREST, |i| (i + 1).max(NEAREST));
             (to < line.len()).then_some(to)
         }
         Item::Laser | Item::Pistol => None,
@@ -532,7 +541,9 @@ mod tests {
             ..Rules::default()
         });
         world.corpses_to_food = true;
-        let column = (1..=5).rev().map(|y| p(9, y)).collect();
+        // Coming down across its line, with room to go on until the
+        // grenade lands 4 cells out.
+        let column = (1..=3).rev().map(|y| p(9, y)).collect();
         world.snakes.push(Snake::new(1, column, Direction::Down));
         world.snakes[0].held = Some(Held {
             kind: Item::Grenade,

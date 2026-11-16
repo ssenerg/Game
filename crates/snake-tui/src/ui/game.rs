@@ -89,6 +89,7 @@ pub fn draw(frame: &mut Frame, app: &SnakeUi, releases: bool) {
         board.looks = Some(&looks);
     }
     board.blind = me.is_some_and(|s| s.blind.is_some());
+    board.me = me.map(|s| s.id);
     frame.render_widget(board, inner);
 }
 

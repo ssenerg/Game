@@ -12,7 +12,8 @@ use crate::board;
 use crate::config::Rules;
 use crate::geom::{Direction, Point, wrap_next};
 use crate::guns::{
-    BEAM_SHOWN, Beam, Bullet, Cloud, Held, Hit, Item, MARK_SPEED, Pickup, Throw, disc, next_cell,
+    BEAM_SHOWN, Beam, Bullet, Cloud, Held, Hit, Item, MARK_SPEED, MIN_THROW, Pickup, Throw, disc,
+    next_cell,
 };
 use crate::snake::{DeathCause, Snake};
 use crate::spawn;
@@ -232,7 +233,8 @@ impl World {
     }
 
     /// Snake `id` let go of `f`: a throw on its way lands where its mark
-    /// is, on the next step. Returns whether there was one.
+    /// is, on the next step, or once the mark is [`MIN_THROW`] cells from
+    /// the head. Returns whether there was one.
     pub fn release(&mut self, id: u8) -> bool {
         let throw = self
             .snakes
@@ -527,10 +529,13 @@ impl World {
         }
     }
 
-    /// Throws on their way: one let go lands where its mark is; the rest
-    /// move their marks on, and one whose mark would go past the board's
-    /// edge is lost. A mark sets off from the head, the step after its
-    /// throw started. Landing blasts go in `hits`, to land with the shots.
+    /// Throws on their way: one let go lands where its mark is, once the
+    /// mark is [`MIN_THROW`] cells from the thrower's head as it was before
+    /// this step, so a quick tap never lands on the thrower; the rest move
+    /// their marks on, and one whose mark would go past the board's edge is
+    /// lost. A mark sets off from
+    /// the head, the step after its throw started. Landing blasts go in
+    /// `hits`, to land with the shots.
     fn throws(&mut self, hits: &mut Vec<(u8, usize, usize)>) {
         let (w, h) = (self.width, self.height);
         for i in 0..self.snakes.len() {
@@ -542,9 +547,16 @@ impl World {
                 continue;
             }
             let (owner, head) = (snake.id, snake.head());
+            let seen = snake.body.get(1).copied().unwrap_or(head);
             match throw.mark {
-                Some(mark) if throw.released => self.land(owner, throw.kind, mark, hits),
-                None if throw.released => self.land(owner, throw.kind, head, hits),
+                // Measured from where the head was, as the player saw it
+                // when they let go: the snakes have moved by now.
+                Some(mark)
+                    if throw.released
+                        && mark.x.abs_diff(seen.x) + mark.y.abs_diff(seen.y) >= MIN_THROW =>
+                {
+                    self.land(owner, throw.kind, mark, hits)
+                }
                 None => {
                     throw.mark = Some(head);
                     self.snakes[i].throw = Some(throw);
@@ -1408,23 +1420,42 @@ mod tests {
             [(Point { x: 8, y: 5 }, Smoke)],
             "everyone sees it"
         );
+        w.step();
+        assert_eq!(mark(&w), Some(Point { x: 10, y: 5 }));
+        assert_eq!(w.snakes[0].head(), Point { x: 8, y: 5 }, "2 cells back");
         assert!(w.release(0));
         w.step();
         assert!(w.snakes[0].throw.is_none());
-        assert!(w.smoky(Point { x: 8, y: 5 }) && w.smoky(Point { x: 11, y: 5 }));
-        assert!(!w.smoky(Point { x: 12, y: 5 }), "a radius of 3");
+        assert!(w.smoky(Point { x: 10, y: 5 }) && w.smoky(Point { x: 13, y: 5 }));
+        assert!(!w.smoky(Point { x: 14, y: 5 }), "a radius of 3");
         w.advance_clock(Duration::from_secs(w.rules.smoke_s));
         assert!(w.smoke.is_empty(), "it clears");
     }
 
+    /// Steps `world` until `done`, and says how many steps that took.
+    fn steps_until(world: &mut World, done: impl Fn(&World) -> bool) -> usize {
+        let mut steps = 0;
+        while !done(world) {
+            world.step();
+            steps += 1;
+            assert!(steps < 20, "never got there");
+        }
+        steps
+    }
+
     #[test]
-    fn a_second_f_throws_as_letting_go_does() {
+    fn a_quick_second_f_throws_once_the_mark_is_clear_of_the_head() {
         let mut w = armed(WallMode::Full, &[(&[(5, 5), (4, 5)], Right)]);
         throw(&mut w, 0, Smoke);
         w.step();
-        assert!(w.fire(0), "f again");
-        w.step();
-        assert_eq!(w.smoke.len(), 1);
+        assert!(w.fire(0), "f again, with the mark still on the head");
+        // The mark gains a cell a step on the head, so it lands 3 steps on,
+        // once it's 2 cells clear of the head, instead of on it.
+        assert_eq!(steps_until(&mut w, |w| !w.smoke.is_empty()), 3);
+        assert_eq!(w.snakes[0].head(), Point { x: 9, y: 5 });
+        let r = w.rules.smoke_radius;
+        assert!(w.smoky(Point { x: 10 + r, y: 5 }), "centered on (10, 5)");
+        assert!(!w.smoky(Point { x: 11 + r, y: 5 }));
     }
 
     #[test]
@@ -1438,9 +1469,10 @@ mod tests {
             kind: Grenade,
             until: w.clock + Duration::from_secs(5),
         });
-        assert!(!w.fire(0), "the grenade waits");
-        w.step();
-        assert_eq!(w.smoke.len(), 1, "the smoke landed");
+        while w.smoke.is_empty() {
+            assert!(!w.fire(0), "the grenade waits");
+            w.step();
+        }
         assert!(w.fire(0), "now the grenade goes");
     }
 
@@ -1465,14 +1497,19 @@ mod tests {
             &[
                 (&[(5, 5), (4, 5)], Right),
                 // Its head lands within the blast once it has moved.
-                (&[(6, 7), (7, 7), (8, 7)], Left),
+                (&[(8, 7), (9, 7), (10, 7)], Left),
                 // Only its second cell does.
-                (&[(8, 4), (8, 5), (8, 6), (8, 7)], Up),
+                (&[(10, 4), (10, 5), (10, 6), (10, 7)], Up),
             ],
         );
-        // Let go at once: it lands at the thrower's own head.
-        throw(&mut w, 0, Grenade);
-        assert!(w.release(0));
+        // Let go with its mark two cells past where the head goes next.
+        w.snakes[0].throw = Some(Throw {
+            kind: Grenade,
+            dir: Right,
+            mark: Some(Point { x: 8, y: 5 }),
+            travelled: 4,
+            released: true,
+        });
         let out = w.step();
         assert_eq!(out.hits, [hit(0, 1, 0), hit(0, 2, 1)]);
         assert_eq!(out.deaths, [(1, Shot)]);
@@ -1492,7 +1529,7 @@ mod tests {
         );
         throw(&mut w, 0, Flashbang);
         w.release(0);
-        w.step();
+        steps_until(&mut w, |w| w.snakes[0].throw.is_none());
         let blind: Vec<bool> = w.snakes.iter().map(|s| s.blind(w.clock)).collect();
         assert_eq!(blind, [false, true, true]);
         assert_eq!(

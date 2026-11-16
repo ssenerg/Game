@@ -5,9 +5,9 @@
 //! - A gun fires straight ahead from the head. A shot that hits a head
 //!   kills that snake; one that hits a body cuts the snake there.
 //! - A thrown item is held on `f` while a mark crosses the board, and
-//!   lands where the mark is when `f` is let go: a grenade's blast hits like
-//!   a shot, a flashbang blinds everyone else, and smoke hides what's under
-//!   it from everyone.
+//!   lands where the mark is when `f` is let go, once the mark is clear of
+//!   the head: a grenade's blast hits like a shot, a flashbang blinds
+//!   everyone else, and smoke hides what's under it from everyone.
 
 use std::time::Duration;
 
@@ -19,6 +19,11 @@ pub const BEAM_SHOWN: Duration = Duration::from_millis(300);
 
 /// Cells a throw's mark moves each step.
 pub const MARK_SPEED: usize = 2;
+
+/// Cells, across and down, a throw's mark must be from the thrower's head
+/// for it to land: one let go sooner goes on until it gets there, so a
+/// quick tap never lands on the thrower.
+pub const MIN_THROW: u16 = 2;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

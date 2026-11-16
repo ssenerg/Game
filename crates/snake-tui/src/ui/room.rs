@@ -193,6 +193,7 @@ fn draw_match(
         origin: origin(center, board, (inner.width / 2, inner.height)),
         looks: Some(&looks),
         blind: mine.is_some_and(|s| s.blind.is_some()),
+        me: mine.map(|s| s.id),
     };
     frame.render_widget(widget, inner);
 

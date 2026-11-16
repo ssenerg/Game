@@ -753,7 +753,13 @@ mod tests {
             assert!(game.snake().throw.is_some(), "on its way");
             assert!(game.world.smoke.is_empty());
             key(&mut ui, second);
-            step(&mut ui);
+            let game = ui.game.as_ref().unwrap();
+            let let_go = game.snake().throw.as_ref().is_some_and(|t| t.released);
+            assert!(let_go, "let go by {second:?}");
+            // It lands once its mark is clear of the head.
+            for _ in 0..4 {
+                step(&mut ui);
+            }
             let game = ui.game.as_ref().unwrap();
             assert_eq!(game.world.smoke.len(), 1, "thrown by {second:?}");
             key(&mut ui, Key::Esc);

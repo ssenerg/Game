@@ -107,3 +107,34 @@ fn board_widget_draws_exactly_what_the_old_code_did() {
         assert_eq!(old, new);
     }
 }
+
+#[test]
+fn only_the_players_own_head_shows_through_smoke() {
+    let rules = Rules {
+        inner_walls: InnerWalls::Off,
+        ..Rules::default()
+    };
+    let world = World::with_players(rules, 5, 2).unwrap();
+    let mut view = world.view();
+    let heads: Vec<_> = view.snakes.iter().map(|s| (s.id, s.body[0])).collect();
+    // Smoke over both heads, and the cells behind them.
+    view.smoke = view.snakes.iter().flat_map(|s| s.body.clone()).collect();
+    let theme = Theme::default();
+    let area = Rect::new(0, 0, view.width * 2, view.height);
+    let drawn = |me: Option<u8>| {
+        let mut buffer = Buffer::empty(area);
+        let mut board = BoardWidget::new(&view, &theme);
+        board.me = me;
+        board.render(area, &mut buffer);
+        buffer
+    };
+    let smoky =
+        |buffer: &Buffer, p: snake_core::geom::Point| buffer[(p.x * 2, p.y)].symbol() == "░";
+    let (mine, theirs) = (heads[0], heads[1]);
+    let seen = drawn(Some(mine.0));
+    assert!(!smoky(&seen, mine.1), "my head shows");
+    assert!(smoky(&seen, theirs.1), "theirs stays hidden");
+    assert!(smoky(&seen, view.snakes[0].body[1]), "and so does my body");
+    let watching = drawn(None);
+    assert!(smoky(&watching, mine.1) && smoky(&watching, theirs.1));
+}

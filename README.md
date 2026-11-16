@@ -138,16 +138,19 @@ gives no speed boost.
   time, gun or thrown, and taking another swaps it. To throw, hold `f`: a
   mark `◎` sets off from your head the way you're going, 2 cells a tick,
   over walls and snakes, and everyone sees it. Let go and the item lands on
-  the mark on the next tick. If the mark goes past the board's edge first,
-  the throw is wasted. Where the terminal can't tell when a key is let go,
-  press `f` once to send the mark and again to throw (see Controls).
+  the mark on the next tick, once the mark is 2 cells from your head: let
+  go sooner, and the mark goes on until it is, so a quick tap never lands
+  on you. If the mark goes past the board's edge first, the throw is
+  wasted. Where the terminal can't tell when a key is let go, press `f`
+  once to send the mark and again to throw (see Controls).
   - the **grenade** `⊕` blasts the cells within 2 of where it lands; each
     counts as hit by a shot, for every snake but yours;
   - the **flashbang** `✦` blinds every other snake for 3 seconds: their
-    board turns white, while you and anyone watching see as usual. Blinded
-    bots follow a few moves they'd planned, then go straight;
+    board turns light gray, while you and anyone watching see as usual.
+    Blinded bots follow a few moves they'd planned, then go straight;
   - **smoke** `≋` covers the cells within 3 for 8 seconds, hiding what's
-    under it from everyone, bots too. Snakes move and get hit under it as
+    under it from everyone, bots too; only your own head shows through, so
+    you always know where you are. Snakes move and get hit under it as
     usual.
 
   A room's host sets how often thrown items come, how long they stay, the

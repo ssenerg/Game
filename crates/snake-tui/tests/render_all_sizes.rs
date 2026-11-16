@@ -650,7 +650,7 @@ fn shown(app: &App, w: u16, h: u16) -> String {
 }
 
 #[test]
-fn a_flashbang_whites_out_the_board_only_for_those_it_blinds() {
+fn a_flashbang_grays_out_the_board_only_for_those_it_blinds() {
     let armed = RoomSettings::new(quick_guns_rules(), RoomKind::Match).unwrap();
     let mut round = Room::new_match(armed, 4, vec![entrant(1), bot_entrant(0)]);
     while !matches!(round.view().shell.phase, PhaseView::Running { .. }) {
@@ -662,7 +662,7 @@ fn a_flashbang_whites_out_the_board_only_for_those_it_blinds() {
     let cells = usize::from(board.width) * 2 * usize::from(board.height);
     let mine = view.shell.seats.iter().find(|s| s.who.id == 1);
     let mine = mine.and_then(|s| s.slot).expect("a seat");
-    // How much of the screen is white, and what it says, for `me` while
+    // How much of the screen is the flash's light gray, and what it says, for `me` while
     // the flashbang blinds snake `blind` and they hold `held`.
     let seen = |me: u64, blind: u8, held: Option<Item>, releases: bool| {
         let mut view = view.clone();
@@ -681,21 +681,21 @@ fn a_flashbang_whites_out_the_board_only_for_those_it_blinds() {
             app.hear_key_releases();
         }
         let buffer = drawn(&app, w, h);
-        let white = buffer
+        let flashed = buffer
             .content
             .iter()
-            .filter(|c| c.bg == Color::White)
+            .filter(|c| c.bg == Color::Gray)
             .count();
-        (white, shown(&app, w, h))
+        (flashed, shown(&app, w, h))
     };
-    let (white, text) = seen(1, mine, None, false);
-    assert!(white >= cells, "{white} of {cells}:\n{text}");
+    let (flashed, text) = seen(1, mine, None, false);
+    assert!(flashed >= cells, "{flashed} of {cells}:\n{text}");
     assert!(text.contains("Blinded · 2 s · ←↑↓→ move"), "{text}");
-    let (white, text) = seen(1, 1 - mine, None, false);
-    assert!(white < 10, "the other snake is blinded, not me:\n{text}");
+    let (flashed, text) = seen(1, 1 - mine, None, false);
+    assert!(flashed < 10, "the other snake is blinded, not me:\n{text}");
     assert!(!text.contains("Blinded"), "{text}");
-    let (white, _) = seen(99, mine, None, false);
-    assert!(white < 10, "those watching see as ever");
+    let (flashed, _) = seen(99, mine, None, false);
+    assert!(flashed < 10, "those watching see as ever");
 
     // How to throw, by what the terminal can say.
     let (_, text) = seen(1, 1 - mine, Some(Item::Grenade), false);
