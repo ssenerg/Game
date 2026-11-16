@@ -1,5 +1,5 @@
 # A SnakeTUI cluster on one machine, to try it out: two game servers
-# behind HAProxy, sharing Postgres, NATS and one matchmaker. From this
+# behind HAProxy, sharing Postgres, NATS, DragonflyDB and one matchmaker. From this
 # directory:
 #
 #   docker compose up --build -d
@@ -29,6 +29,17 @@ services:
     # This demo's own password, like Postgres's: it runs on one machine.
     command: ["--user", "snaketui", "--pass", "snaketui"]
 
+  # Where every server counts the rate limits, and keeps the leaderboard
+  # a while.
+  dragonfly:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:v2.0.2
+    command: ["--proactor_threads=1", "--maxmemory=256mb", "--dbfilename="]
+    user: "999:999"
+    tmpfs:
+      - /data:uid=999,gid=999
+    ulimits:
+      memlock: -1
+
   # Makes the host key every server shares, once.
   host-key:
     build:
@@ -55,6 +66,8 @@ services:
       postgres:
         condition: service_healthy
       nats:
+        condition: service_started
+      dragonfly:
         condition: service_started
     # Rounds in play finish before a server stops (drain_timeout_secs).
     stop_grace_period: 230s

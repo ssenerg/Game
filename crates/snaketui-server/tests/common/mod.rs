@@ -63,6 +63,8 @@ impl TestServer {
             workers: 2,
             // Tests that stop servers mid-round would wait for it.
             drain_timeout_secs: 0,
+            // Every test's players connect from the same address.
+            new_sessions_per_ip_per_minute: 0,
             ..ServerConfig::default()
         };
         tweak(&mut cfg);

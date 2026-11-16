@@ -221,7 +221,10 @@ sudo ssh-keygen -lf /var/lib/snaketui/host_ed25519_key
 ## Settings
 
 `/etc/snaketui/server.toml` lists every setting with its default: listening
-address, connection limits, and timeouts. After changing it, run:
+address, connection limits, and timeouts. Its `[cache]` can name a
+DragonflyDB or Redis for the rate limits; on one server, the game's own
+memory does as well, though a restart forgets the counts. After changing
+it, run:
 
 ```bash
 sudo systemctl restart snaketui

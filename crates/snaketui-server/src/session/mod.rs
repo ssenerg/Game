@@ -1065,15 +1065,13 @@ impl SessionActor {
                 Box::pin(async move {
                     // Wrong codes count per address too, or reconnecting
                     // would give a fresh five each time.
-                    match guesses.may_try_code(ip, now()).await {
-                        Ok(Ok(())) => {}
-                        Ok(Err(_)) => return Err(JoinFail::CodesFromAddress),
-                        Err(_) => return Err(JoinFail::Unavailable),
+                    if guesses.may_try_code(ip, now()).await.is_err() {
+                        return Err(JoinFail::CodesFromAddress);
                     }
                     match lobby.send(FindRoom(code)).await {
                         Ok(Some(room)) => seat(room, who, account, presence).await,
                         Ok(None) => {
-                            let _ = guesses.wrong_code(ip, now()).await;
+                            guesses.wrong_code(ip, now()).await;
                             Err(JoinFail::NoSuchCode)
                         }
                         Err(_) => Err(JoinFail::Closed),

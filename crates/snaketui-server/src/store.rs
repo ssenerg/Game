@@ -4,7 +4,7 @@
 //!   settings, single-player records, quick-play rating, and friends.
 //! - Guests who connect with a key: their nickname, settings and
 //!   single-player records, until they sign up.
-//! - Recent wrong passwords and new accounts, for the guessing limits.
+//! - Ratings, and the leaderboard they make, read through the cache.
 //!
 //! Guests without a key aren't stored. One server keeps everything in
 //! SQLite; several servers share one Postgres database. Both run the same
@@ -21,11 +21,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, bail};
 use game_api::{GameId, Records};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use sqlx::any::{AnyPoolOptions, AnyRow};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode};
 use sqlx::{AnyConnection, AnyPool, ConnectOptions, Connection, Executor, Row};
 use tracing::{info, warn};
 
+use crate::cache::Cache;
 use crate::games::{self, RatingSystem};
 use crate::rating::{self, Rating, RatingKey, Skill, days_between};
 use crate::room::{RoomRef, ServerId};
@@ -89,7 +92,8 @@ CREATE TABLE IF NOT EXISTS friends (
     CHECK (a < b)
 );
 CREATE INDEX IF NOT EXISTS friends_b ON friends (b);
--- Wrong passwords and new accounts, for the guessing limits.
+-- Wrong passwords and new accounts, for the guessing limits: unused since
+-- they count in the cache, and kept for servers of the version before.
 CREATE TABLE IF NOT EXISTS limit_events (
     kind    TEXT NOT NULL,
     subject TEXT NOT NULL,
@@ -165,6 +169,7 @@ CREATE TABLE IF NOT EXISTS friends (
     CHECK (a < b)
 );
 CREATE INDEX IF NOT EXISTS friends_b ON friends (b);
+-- Unused since the guessing limits count in the cache; see SQLite's.
 CREATE TABLE IF NOT EXISTS limit_events (
     kind    TEXT NOT NULL,
     subject TEXT NOT NULL,
@@ -528,6 +533,25 @@ macro_rules! account_columns {
 pub struct Store {
     pool: AnyPool,
     writes: Arc<Writes>,
+    /// Where reads worth not repeating are kept a while.
+    cache: Cache,
+}
+
+/// Leaderboard pages and players' places are kept this long in a shared
+/// cache, unless a rated round changes them first. Without one, they're
+/// read afresh every time.
+const BOARD_KEPT: Duration = Duration::from_secs(60);
+/// Players' ratings are kept this long, in the same way.
+const RATINGS_KEPT: Duration = Duration::from_secs(120);
+
+/// Where the cache counts changes to the leaderboard of `key`.
+fn board_generation(key: RatingKey) -> String {
+    format!("board-gen:{}:{}", key.game.as_str(), key.category)
+}
+
+/// Where the cache counts changes to `id`'s ratings.
+fn ratings_generation(id: AccountId) -> String {
+    format!("ratings-gen:{id}")
 }
 
 /// Writes running in the background, which a stopping server waits for.
@@ -556,7 +580,7 @@ pub struct Account {
 
 /// An account's standing in one rating: how good it's thought to be, and
 /// its rated games.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Standing {
     pub rating: Skill,
     pub games: u32,
@@ -613,7 +637,7 @@ pub struct Friend {
 }
 
 /// An account as the leaderboard shows it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Ranked {
     pub username: String,
     pub standing: Standing,
@@ -700,45 +724,6 @@ async fn open_postgres(url: &str) -> Result<AnyPool> {
     Ok(pool)
 }
 
-/// What the guessing limits count.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Counted {
-    /// A wrong password for a username.
-    WrongForName,
-    /// A wrong password from an IP address.
-    WrongFromAddress,
-    /// A new account from an IP address.
-    SignUp,
-    /// Trying to make an account from an IP address, made or not.
-    SignUpTry,
-    /// A room code that matched no room, from an IP address.
-    WrongCode,
-    /// A friend request from an account.
-    FriendAsk,
-    /// A friend request from one account to another.
-    FriendAskPair,
-    /// An invite from an account.
-    Invite,
-    /// An invite from one account to another.
-    InvitePair,
-}
-
-impl Counted {
-    fn tag(self) -> &'static str {
-        match self {
-            Counted::WrongForName => "name",
-            Counted::WrongFromAddress => "address",
-            Counted::SignUp => "signup",
-            Counted::SignUpTry => "signup_try",
-            Counted::WrongCode => "code",
-            Counted::FriendAsk => "ask",
-            Counted::FriendAskPair => "ask_pair",
-            Counted::Invite => "invite",
-            Counted::InvitePair => "invite_pair",
-        }
-    }
-}
-
 impl Store {
     /// Opens the database at `url`, creating its tables if need be:
     /// `sqlite:///path/to/file.db` (or `sqlite::memory:` for tests), or
@@ -753,7 +738,33 @@ impl Store {
         Ok(Self {
             pool,
             writes: Arc::default(),
+            cache: Cache::memory(),
         })
+    }
+
+    /// The same, keeping reads in `cache` rather than this server's memory.
+    pub fn with_cache(self, cache: Cache) -> Self {
+        Self { cache, ..self }
+    }
+
+    /// What's kept under `key` in the shared cache, as `T`, if it's there.
+    async fn kept<T: DeserializeOwned>(&self, key: &str) -> Option<T> {
+        postcard::from_bytes(&self.cache.get(key).await?).ok()
+    }
+
+    async fn keep<T: Serialize>(&self, key: &str, value: &T, keep: Duration) {
+        if let Ok(bytes) = postcard::to_allocvec(value) {
+            self.cache.put(key, &bytes, keep).await;
+        }
+    }
+
+    /// After a rated round in `key`: its leaderboard, and these accounts'
+    /// ratings, are read afresh.
+    async fn ratings_changed(&self, key: RatingKey, accounts: impl Iterator<Item = AccountId>) {
+        self.cache.bump(&board_generation(key)).await;
+        for id in accounts {
+            self.cache.bump(&ratings_generation(id)).await;
+        }
     }
 
     /// Runs `write` in the background, on this thread's arbiter. A stopping
@@ -1013,6 +1024,27 @@ impl Store {
 
     /// Every rating `id` has played in, in games this server serves.
     pub async fn ratings(&self, id: AccountId) -> Result<Vec<(RatingKey, Standing)>> {
+        let Some(generation) = self.cache.generation(&ratings_generation(id)).await else {
+            return self.read_ratings(id).await;
+        };
+        let kept_at = format!("ratings:{id}:{generation}");
+        // Kept by name: a key's category isn't read back as itself.
+        let to_key = |(game, category, standing): (String, String, Standing)| {
+            Some((games::rating_key(&game, &category)?, standing))
+        };
+        if let Some(kept) = self.kept::<Vec<(String, String, Standing)>>(&kept_at).await {
+            return Ok(kept.into_iter().filter_map(to_key).collect());
+        }
+        let ratings = self.read_ratings(id).await?;
+        let named: Vec<(&str, &str, Standing)> = ratings
+            .iter()
+            .map(|(key, standing)| (key.game.as_str(), key.category, *standing))
+            .collect();
+        self.keep(&kept_at, &named, RATINGS_KEPT).await;
+        Ok(ratings)
+    }
+
+    async fn read_ratings(&self, id: AccountId) -> Result<Vec<(RatingKey, Standing)>> {
         let rows = sqlx::query(
             "SELECT game, category, rating, deviation, volatility, games, wins, rated_at
              FROM ratings WHERE account_id = $1",
@@ -1184,6 +1216,7 @@ impl Store {
             save_standing(&mut tx, id, key, rating, (won, drew)).await?;
         }
         tx.commit().await?;
+        self.ratings_changed(key, players.iter().map(|p| p.0)).await;
         Ok(before.into_iter().map(|s| s.rating).zip(after).collect())
     }
 
@@ -1195,12 +1228,33 @@ impl Store {
             save_standing(&mut tx, r.account, key, r.rating, (r.won, false)).await?;
         }
         tx.commit().await?;
+        self.ratings_changed(key, results.iter().map(|r| r.account))
+            .await;
         Ok(())
     }
 
     /// The best accounts by the rating `key` with at least `min_games`
     /// rated games, best first: by rating, then games played, then name.
     pub async fn leaderboard(
+        &self,
+        key: RatingKey,
+        min_games: u32,
+        limit: u32,
+    ) -> Result<Vec<Ranked>> {
+        let Some(generation) = self.cache.generation(&board_generation(key)).await else {
+            return self.read_leaderboard(key, min_games, limit).await;
+        };
+        let (game, category) = (key.game.as_str(), key.category);
+        let kept_at = format!("board:{game}:{category}:{generation}:{min_games}:{limit}");
+        if let Some(kept) = self.kept(&kept_at).await {
+            return Ok(kept);
+        }
+        let board = self.read_leaderboard(key, min_games, limit).await?;
+        self.keep(&kept_at, &board, BOARD_KEPT).await;
+        Ok(board)
+    }
+
+    async fn read_leaderboard(
         &self,
         key: RatingKey,
         min_games: u32,
@@ -1233,6 +1287,25 @@ impl Store {
     /// Where `account` stands on [`Self::leaderboard`] for `key`, 1 for the
     /// best; `None` until it has `min_games` rated games.
     pub async fn place_of(
+        &self,
+        key: RatingKey,
+        account: AccountId,
+        min_games: u32,
+    ) -> Result<Option<u32>> {
+        let Some(generation) = self.cache.generation(&board_generation(key)).await else {
+            return self.read_place(key, account, min_games).await;
+        };
+        let (game, category) = (key.game.as_str(), key.category);
+        let kept_at = format!("place:{game}:{category}:{generation}:{account}:{min_games}");
+        if let Some(kept) = self.kept(&kept_at).await {
+            return Ok(kept);
+        }
+        let place = self.read_place(key, account, min_games).await?;
+        self.keep(&kept_at, &place, BOARD_KEPT).await;
+        Ok(place)
+    }
+
+    async fn read_place(
         &self,
         key: RatingKey,
         account: AccountId,
@@ -1433,62 +1506,6 @@ impl Store {
         })
     }
 
-    // Guessing limits. Times are seconds since the epoch; see crate::auth.
-
-    /// How many times `what` happened to `subject` after `since`.
-    pub async fn count(&self, what: Counted, subject: &str, since: i64) -> Result<i64> {
-        let row = sqlx::query(
-            "SELECT COUNT(*) FROM limit_events WHERE kind = $1 AND subject = $2 AND at > $3",
-        )
-        .bind(what.tag())
-        .bind(subject)
-        .bind(since)
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(row.try_get(0)?)
-    }
-
-    pub async fn note(&self, what: Counted, subject: &str, at: i64) -> Result<()> {
-        sqlx::query("INSERT INTO limit_events (kind, subject, at) VALUES ($1, $2, $3)")
-            .bind(what.tag())
-            .bind(subject)
-            .bind(at)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    pub async fn forget(&self, what: Counted, subject: &str) -> Result<()> {
-        sqlx::query("DELETE FROM limit_events WHERE kind = $1 AND subject = $2")
-            .bind(what.tag())
-            .bind(subject)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    pub async fn lock_name(&self, name: &str, until: i64) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO name_locks (name, until) VALUES ($1, $2)
-             ON CONFLICT (name) DO UPDATE SET until = excluded.until",
-        )
-        .bind(name)
-        .bind(until)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    /// When the lock on `name` runs out, if it has one.
-    pub async fn name_locked_until(&self, name: &str) -> Result<Option<i64>> {
-        let row = sqlx::query("SELECT until FROM name_locks WHERE name = $1")
-            .bind(name)
-            .fetch_optional(&self.pool)
-            .await?;
-        row.map(|row| Ok(row.try_get(0)?)).transpose()
-    }
-
-    /// Drops events from before `before`, and locks that ran out by `now`.
     /// Forgets guests not seen since `quiet_since` who saved nothing but a
     /// visit, and every guest not seen since `gone_since`, with what they
     /// saved.
@@ -1511,18 +1528,6 @@ impl Store {
         )
         .execute(&self.pool)
         .await?;
-        Ok(())
-    }
-
-    pub async fn tidy_limits(&self, before: i64, now: i64) -> Result<()> {
-        sqlx::query("DELETE FROM limit_events WHERE at <= $1")
-            .bind(before)
-            .execute(&self.pool)
-            .await?;
-        sqlx::query("DELETE FROM name_locks WHERE until <= $1")
-            .bind(now)
-            .execute(&self.pool)
-            .await?;
         Ok(())
     }
 
@@ -1772,9 +1777,9 @@ mod tests {
         chess_is_rated_by_glicko_2_in_each_category_apart,
         friendship_needs_both_sides,
         the_leaderboard_ranks_accounts_with_enough_games,
+        kept_reads_change_with_a_rated_round,
         requests_waiting_for_an_answer_are_limited,
         asking_back_respects_the_friend_limit,
-        limits_count_recent_events_and_tidy_away_old_ones,
         room_codes_are_claimed_once_and_expire,
         snake_ratings_and_settings_are_copied_for_the_game,
         the_last_game_is_kept_for_guests_and_accounts,
@@ -2631,6 +2636,81 @@ mod tests {
         );
     }
 
+    /// Rates `who` in a round of Snake's quick play, ending at `mu`.
+    async fn rated_at(store: &Store, who: AccountId, mu: f64) {
+        let results = [RatedResult {
+            account: who,
+            rating: Rating { mu, sigma: 4.0 }.into(),
+            won: true,
+        }];
+        store.save_rated_round(SNAKE_QUICK, &results).await.unwrap();
+    }
+
+    async fn kept_reads_change_with_a_rated_round(store: Store) {
+        let ann = account(&store, "ann", None).await;
+        let ben = account(&store, "ben", None).await;
+        for _ in 0..5 {
+            rated_at(&store, ann.id, 26.0).await;
+            rated_at(&store, ben.id, 27.0).await;
+        }
+        let names = |board: Vec<Ranked>| board.into_iter().map(|r| r.username).collect::<Vec<_>>();
+        let mine = |ratings: Vec<(RatingKey, Standing)>| {
+            let (_, standing) = ratings
+                .into_iter()
+                .find(|(k, _)| *k == SNAKE_QUICK)
+                .unwrap();
+            (standing.games, standing.rating.mu())
+        };
+        // Read once, and so kept, then read again from where they're kept.
+        for _ in 0..2 {
+            let board = store.leaderboard(SNAKE_QUICK, 5, 20).await.unwrap();
+            assert_eq!(names(board), ["ben", "ann"]);
+            assert_eq!(
+                store.place_of(SNAKE_QUICK, ann.id, 5).await.unwrap(),
+                Some(2)
+            );
+            assert_eq!(mine(store.ratings(ann.id).await.unwrap()), (5, 26.0));
+        }
+        // Ann's next round puts her first: every read shows it at once.
+        rated_at(&store, ann.id, 28.0).await;
+        let board = store.leaderboard(SNAKE_QUICK, 5, 20).await.unwrap();
+        assert_eq!(names(board), ["ann", "ben"]);
+        assert_eq!(
+            store.place_of(SNAKE_QUICK, ann.id, 5).await.unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            store.place_of(SNAKE_QUICK, ben.id, 5).await.unwrap(),
+            Some(2)
+        );
+        assert_eq!(mine(store.ratings(ann.id).await.unwrap()), (6, 28.0));
+        // And so does a round rated here between the two.
+        store
+            .rate_round(SNAKE_QUICK, &[(ben.id, 1, true), (ann.id, 2, false)])
+            .await
+            .unwrap();
+        assert_eq!(mine(store.ratings(ben.id).await.unwrap()).0, 6);
+        assert_eq!(mine(store.ratings(ann.id).await.unwrap()).0, 7);
+    }
+
+    #[actix_rt::test]
+    async fn kept_reads_in_dragonfly_change_with_a_rated_round() {
+        let cache = Cache::connect(&crate::config::CacheConfig {
+            url: snaketui_test_services::dragonfly(),
+            // Each run keeps to keys of its own: its accounts' ids repeat.
+            prefix: format!("t{:x}", rand::random::<u64>()),
+        })
+        .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while cache.up() != Some(true) {
+            assert!(std::time::Instant::now() < deadline, "no DragonflyDB");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let store = sqlite().await.with_cache(cache.clone());
+        kept_reads_change_with_a_rated_round(store).await;
+        assert_eq!(cache.up(), Some(true), "all of it in DragonflyDB");
+    }
+
     async fn the_leaderboard_ranks_accounts_with_enough_games(store: Store) {
         // Plays `games` rated rounds for `who`, ending at rating `mu`.
         let rated = |who: AccountId, mu: f64, games: u32| {
@@ -2826,27 +2906,5 @@ mod tests {
         );
         store.forget_code("ABC234", at(3)).await.unwrap();
         assert_eq!(store.find_code("ABC234", 0).await.unwrap(), None);
-    }
-
-    async fn limits_count_recent_events_and_tidy_away_old_ones(store: Store) {
-        let what = Counted::WrongForName;
-        for at in [100, 200, 300] {
-            store.note(what, "alice", at).await.unwrap();
-        }
-        store.note(Counted::SignUp, "alice", 300).await.unwrap();
-        assert_eq!(store.count(what, "alice", 150).await.unwrap(), 2);
-        assert_eq!(store.count(what, "bob", 0).await.unwrap(), 0);
-        store.lock_name("alice", 1000).await.unwrap();
-        store.lock_name("alice", 1200).await.unwrap();
-        assert_eq!(store.name_locked_until("alice").await.unwrap(), Some(1200));
-
-        store.tidy_limits(200, 1100).await.unwrap();
-        assert_eq!(store.count(what, "alice", 0).await.unwrap(), 1);
-        assert_eq!(store.name_locked_until("alice").await.unwrap(), Some(1200));
-        store.tidy_limits(200, 1200).await.unwrap();
-        assert_eq!(store.name_locked_until("alice").await.unwrap(), None);
-        store.forget(what, "alice").await.unwrap();
-        assert_eq!(store.count(what, "alice", 0).await.unwrap(), 0);
-        assert_eq!(store.count(Counted::SignUp, "alice", 0).await.unwrap(), 1);
     }
 }

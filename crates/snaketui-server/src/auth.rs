@@ -15,8 +15,9 @@ use tokio::sync::Semaphore;
 use zeroize::Zeroizing;
 
 use crate::accept::counted_as;
+use crate::cache::Cache;
 use crate::identity::GENERIC_USERS;
-use crate::store::{AccountId, Counted, Store};
+use crate::store::AccountId;
 
 pub const MIN_USERNAME: usize = 3;
 pub const MAX_USERNAME: usize = 16;
@@ -216,12 +217,12 @@ impl Refused {
 }
 
 /// Who has guessed wrong, and who has made accounts, recently. The counts
-/// live in the store, so every server sharing a database sees the same
-/// ones. Times are seconds since the epoch, passed in so tests can drive
-/// the clock.
+/// live in the cache, so every server sharing one sees the same ones.
+/// Times are seconds since the epoch, passed in so tests can drive the
+/// clock.
 #[derive(Clone)]
 pub struct GuessLimits {
-    store: Store,
+    cache: Cache,
     /// Names and addresses with a try going on this server.
     busy: Arc<Mutex<HashSet<String>>>,
 }
@@ -248,10 +249,70 @@ fn secs(d: Duration) -> i64 {
     d.as_secs() as i64
 }
 
+/// What the limits count, each for as long as it counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Counted {
+    /// A wrong password for a username.
+    WrongForName,
+    /// A wrong password from an IP address.
+    WrongFromAddress,
+    /// A new account from an IP address.
+    SignUp,
+    /// Trying to make an account from an IP address, made or not.
+    SignUpTry,
+    /// A room code that matched no room, from an IP address.
+    WrongCode,
+    /// A friend request from an account.
+    FriendAsk,
+    /// A friend request from one account to another.
+    FriendAskPair,
+    /// An invite from an account.
+    Invite,
+    /// An invite from one account to another.
+    InvitePair,
+}
+
+impl Counted {
+    /// Where the cache counts it for `subject`.
+    fn key(self, subject: &str) -> String {
+        let tag = match self {
+            Counted::WrongForName => "name",
+            Counted::WrongFromAddress => "address",
+            Counted::SignUp => "signup",
+            Counted::SignUpTry => "signup_try",
+            Counted::WrongCode => "code",
+            Counted::FriendAsk => "ask",
+            Counted::FriendAskPair => "ask_pair",
+            Counted::Invite => "invite",
+            Counted::InvitePair => "invite_pair",
+        };
+        format!("limit:{tag}:{subject}")
+    }
+
+    /// How long one counts.
+    fn window(self) -> Duration {
+        match self {
+            Counted::WrongForName => NAME_WINDOW,
+            Counted::WrongFromAddress => IP_WINDOW,
+            Counted::SignUp => SIGNUP_WINDOW,
+            Counted::SignUpTry => SIGNUP_TRY_WINDOW,
+            Counted::WrongCode => CODE_WINDOW,
+            Counted::FriendAsk => FRIEND_ASK_WINDOW,
+            Counted::FriendAskPair => SAME_ASK_WINDOW,
+            Counted::Invite | Counted::InvitePair => INVITE_WINDOW,
+        }
+    }
+}
+
+/// Where the cache keeps a locked name's lock.
+fn lock_key(name: &str) -> String {
+    format!("lock:name:{name}")
+}
+
 impl GuessLimits {
-    pub fn new(store: Store) -> Self {
+    pub fn new(cache: Cache) -> Self {
         Self {
-            store,
+            cache,
             busy: Arc::default(),
         }
     }
@@ -273,111 +334,78 @@ impl GuessLimits {
         })
     }
 
-    pub async fn may_sign_in(
-        &self,
-        name: &str,
-        from: IpAddr,
-        now: i64,
-    ) -> Result<Result<(), Refused>> {
-        let name = name.to_ascii_lowercase();
-        if self
-            .store
-            .name_locked_until(&name)
-            .await?
-            .is_some_and(|until| now < until)
-        {
-            return Ok(Err(Refused::NameLocked));
-        }
-        let tries = self
-            .store
-            .count(
-                Counted::WrongFromAddress,
-                &counted_as(from).to_string(),
-                now - secs(IP_WINDOW),
-            )
-            .await?;
-        if tries >= IP_TRIES as i64 {
-            return Ok(Err(Refused::TooManyFromAddress));
-        }
-        Ok(Ok(()))
+    /// How many of `what` for `subject` count at `now`.
+    async fn count(&self, what: Counted, subject: &str, now: i64) -> usize {
+        let since = now - secs(what.window());
+        self.cache.count(&what.key(subject), since).await as usize
     }
 
-    pub async fn failed(&self, name: &str, from: IpAddr, now: i64) -> Result<()> {
+    async fn note(&self, what: Counted, subject: &str, now: i64) {
+        self.cache
+            .note(&what.key(subject), now, what.window())
+            .await;
+    }
+
+    pub async fn may_sign_in(&self, name: &str, from: IpAddr, now: i64) -> Result<(), Refused> {
         let name = name.to_ascii_lowercase();
-        let store = &self.store;
-        store
-            .note(
-                Counted::WrongFromAddress,
-                &counted_as(from).to_string(),
-                now,
-            )
-            .await?;
-        store.note(Counted::WrongForName, &name, now).await?;
-        let tries = store
-            .count(Counted::WrongForName, &name, now - secs(NAME_WINDOW))
-            .await?;
-        if tries >= NAME_TRIES as i64 {
-            store.forget(Counted::WrongForName, &name).await?;
-            store.lock_name(&name, now + secs(NAME_LOCK)).await?;
+        let locked = self.cache.held_until(&lock_key(&name)).await;
+        if locked.is_some_and(|until| now < until) {
+            return Err(Refused::NameLocked);
+        }
+        let address = counted_as(from).to_string();
+        if self.count(Counted::WrongFromAddress, &address, now).await >= IP_TRIES {
+            return Err(Refused::TooManyFromAddress);
         }
         Ok(())
     }
 
-    pub async fn succeeded(&self, name: &str) -> Result<()> {
-        self.store
-            .forget(Counted::WrongForName, &name.to_ascii_lowercase())
-            .await
+    pub async fn failed(&self, name: &str, from: IpAddr, now: i64) {
+        let name = name.to_ascii_lowercase();
+        let address = counted_as(from).to_string();
+        self.note(Counted::WrongFromAddress, &address, now).await;
+        self.note(Counted::WrongForName, &name, now).await;
+        if self.count(Counted::WrongForName, &name, now).await >= NAME_TRIES {
+            self.cache.forget(&Counted::WrongForName.key(&name)).await;
+            let until = now + secs(NAME_LOCK);
+            self.cache.hold(&lock_key(&name), until, now).await;
+        }
+    }
+
+    pub async fn succeeded(&self, name: &str) {
+        let name = name.to_ascii_lowercase();
+        self.cache.forget(&Counted::WrongForName.key(&name)).await;
     }
 
     /// Whether `from` may try to make an account. Every try counts.
-    pub async fn may_sign_up(&self, from: IpAddr, now: i64) -> Result<Result<(), Refused>> {
+    pub async fn may_sign_up(&self, from: IpAddr, now: i64) -> Result<(), Refused> {
         let address = counted_as(from).to_string();
-        let tried = self
-            .store
-            .count(Counted::SignUpTry, &address, now - secs(SIGNUP_TRY_WINDOW))
-            .await?;
-        if tried >= SIGNUP_TRIES as i64 {
-            return Ok(Err(Refused::TooManySignUpTries));
+        if self.count(Counted::SignUpTry, &address, now).await >= SIGNUP_TRIES {
+            return Err(Refused::TooManySignUpTries);
         }
-        self.store.note(Counted::SignUpTry, &address, now).await?;
-        let made = self
-            .store
-            .count(Counted::SignUp, &address, now - secs(SIGNUP_WINDOW))
-            .await?;
-        Ok(if made >= SIGNUPS as i64 {
-            Err(Refused::TooManySignUps)
-        } else {
-            Ok(())
-        })
+        self.note(Counted::SignUpTry, &address, now).await;
+        if self.count(Counted::SignUp, &address, now).await >= SIGNUPS {
+            return Err(Refused::TooManySignUps);
+        }
+        Ok(())
     }
 
-    pub async fn signed_up(&self, from: IpAddr, now: i64) -> Result<()> {
-        self.store
-            .note(Counted::SignUp, &counted_as(from).to_string(), now)
-            .await
+    pub async fn signed_up(&self, from: IpAddr, now: i64) {
+        let address = counted_as(from).to_string();
+        self.note(Counted::SignUp, &address, now).await;
     }
 
     /// Whether `from` may try another room code.
-    pub async fn may_try_code(&self, from: IpAddr, now: i64) -> Result<Result<(), Refused>> {
-        let wrong = self
-            .store
-            .count(
-                Counted::WrongCode,
-                &counted_as(from).to_string(),
-                now - secs(CODE_WINDOW),
-            )
-            .await?;
-        Ok(if wrong >= CODE_TRIES as i64 {
-            Err(Refused::TooManyCodes)
-        } else {
-            Ok(())
-        })
+    pub async fn may_try_code(&self, from: IpAddr, now: i64) -> Result<(), Refused> {
+        let address = counted_as(from).to_string();
+        if self.count(Counted::WrongCode, &address, now).await >= CODE_TRIES {
+            return Err(Refused::TooManyCodes);
+        }
+        Ok(())
     }
 
-    pub async fn wrong_code(&self, from: IpAddr, now: i64) -> Result<()> {
-        self.store
-            .note(Counted::WrongCode, &counted_as(from).to_string(), now)
-            .await
+    pub async fn wrong_code(&self, from: IpAddr, now: i64) {
+        let address = counted_as(from).to_string();
+        self.note(Counted::WrongCode, &address, now).await;
     }
 
     /// Whether `from` may ask `to` to be friends; counts it if so.
@@ -386,20 +414,18 @@ impl GuessLimits {
         from: AccountId,
         to: AccountId,
         now: i64,
-    ) -> Result<Result<(), Refused>> {
+    ) -> Result<(), Refused> {
         let limits = [
             (
                 Counted::FriendAsk,
                 from.to_string(),
                 FRIEND_ASKS,
-                FRIEND_ASK_WINDOW,
                 Refused::TooManyAsks,
             ),
             (
                 Counted::FriendAskPair,
                 format!("{from}>{to}"),
                 SAME_ASKS,
-                SAME_ASK_WINDOW,
                 Refused::AskedThemLately,
             ),
         ];
@@ -412,20 +438,18 @@ impl GuessLimits {
         from: AccountId,
         to: AccountId,
         now: i64,
-    ) -> Result<Result<(), Refused>> {
+    ) -> Result<(), Refused> {
         let limits = [
             (
                 Counted::Invite,
                 from.to_string(),
                 INVITES,
-                INVITE_WINDOW,
                 Refused::TooManyInvites,
             ),
             (
                 Counted::InvitePair,
                 format!("{from}>{to}"),
                 SAME_INVITES,
-                INVITE_WINDOW,
                 Refused::InvitedThemLately,
             ),
         ];
@@ -436,29 +460,18 @@ impl GuessLimits {
     /// they all are.
     async fn within(
         &self,
-        limits: &[(Counted, String, usize, Duration, Refused)],
+        limits: &[(Counted, String, usize, Refused)],
         now: i64,
-    ) -> Result<Result<(), Refused>> {
-        for (what, subject, most, window, refused) in limits {
-            if self
-                .store
-                .count(*what, subject, now - secs(*window))
-                .await?
-                >= *most as i64
-            {
-                return Ok(Err(*refused));
+    ) -> Result<(), Refused> {
+        for (what, subject, most, refused) in limits {
+            if self.count(*what, subject, now).await >= *most {
+                return Err(*refused);
             }
         }
         for (what, subject, ..) in limits {
-            self.store.note(*what, subject, now).await?;
+            self.note(*what, subject, now).await;
         }
-        Ok(Ok(()))
-    }
-
-    /// Forgets what no longer counts, so the tables stay small.
-    pub async fn tidy(&self, now: i64) -> Result<()> {
-        let longest = NAME_WINDOW.max(IP_WINDOW).max(SIGNUP_WINDOW);
-        self.store.tidy_limits(now - secs(longest), now).await
+        Ok(())
     }
 }
 
@@ -523,7 +536,7 @@ mod tests {
     }
 
     async fn limits() -> GuessLimits {
-        GuessLimits::new(Store::open("sqlite::memory:").await.unwrap())
+        GuessLimits::new(Cache::memory())
     }
 
     const START: i64 = 1_000_000;
@@ -533,24 +546,45 @@ mod tests {
         let limits = limits().await;
         for i in 0..NAME_TRIES {
             let from = ip(i as u8);
-            assert_eq!(
-                limits.may_sign_in("Alice", from, START).await.unwrap(),
-                Ok(())
-            );
-            limits.failed("Alice", from, START).await.unwrap();
+            assert_eq!(limits.may_sign_in("Alice", from, START).await, Ok(()));
+            limits.failed("Alice", from, START).await;
         }
         assert_eq!(
-            limits.may_sign_in("alice", ip(99), START).await.unwrap(),
+            limits.may_sign_in("alice", ip(99), START).await,
             Err(Refused::NameLocked),
             "from anywhere, in any case"
         );
-        assert_eq!(
-            limits.may_sign_in("bob", ip(99), START).await.unwrap(),
-            Ok(())
-        );
+        assert_eq!(limits.may_sign_in("bob", ip(99), START).await, Ok(()));
         let later = START + secs(NAME_LOCK);
+        assert_eq!(limits.may_sign_in("alice", ip(99), later).await, Ok(()));
+    }
+
+    #[actix_rt::test]
+    async fn dragonfly_counts_the_guesses_for_every_server() {
+        let cfg = crate::config::CacheConfig {
+            url: snaketui_test_services::dragonfly(),
+            prefix: format!("t{:x}", rand::random::<u64>()),
+        };
+        // Two servers, each with its own connection to the same cache.
+        let one = Cache::connect(&cfg).unwrap();
+        let other = Cache::connect(&cfg).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while one.up() != Some(true) || other.up() != Some(true) {
+            assert!(std::time::Instant::now() < deadline, "no DragonflyDB");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let (one, other) = (GuessLimits::new(one), GuessLimits::new(other));
+        for i in 0..NAME_TRIES {
+            let server = if i % 2 == 0 { &one } else { &other };
+            server.failed("alice", ip(i as u8), START).await;
+        }
         assert_eq!(
-            limits.may_sign_in("alice", ip(99), later).await.unwrap(),
+            other.may_sign_in("Alice", ip(99), START).await,
+            Err(Refused::NameLocked)
+        );
+        assert_eq!(
+            one.may_sign_in("alice", ip(99), START + secs(NAME_LOCK))
+                .await,
             Ok(())
         );
     }
@@ -560,46 +594,31 @@ mod tests {
         let limits = limits().await;
         let mut now = START;
         for _ in 0..20 {
-            limits.failed("alice", ip(1), now).await.unwrap();
-            limits.succeeded("alice").await.unwrap();
+            limits.failed("alice", ip(1), now).await;
+            limits.succeeded("alice").await;
             now += 60;
         }
-        assert_eq!(
-            limits.may_sign_in("alice", ip(2), now).await.unwrap(),
-            Ok(())
-        );
+        assert_eq!(limits.may_sign_in("alice", ip(2), now).await, Ok(()));
         for _ in 0..NAME_TRIES - 1 {
-            limits.failed("alice", ip(2), now).await.unwrap();
+            limits.failed("alice", ip(2), now).await;
             now += secs(NAME_WINDOW) / 4;
         }
-        assert_eq!(
-            limits.may_sign_in("alice", ip(2), now).await.unwrap(),
-            Ok(())
-        );
+        assert_eq!(limits.may_sign_in("alice", ip(2), now).await, Ok(()));
     }
 
     #[actix_rt::test]
     async fn one_address_gets_twenty_wrong_guesses_an_hour() {
         let limits = limits().await;
         for i in 0..IP_TRIES {
-            limits
-                .failed(&format!("user{i}"), ip(1), START)
-                .await
-                .unwrap();
+            limits.failed(&format!("user{i}"), ip(1), START).await;
         }
         assert_eq!(
-            limits.may_sign_in("someone", ip(1), START).await.unwrap(),
+            limits.may_sign_in("someone", ip(1), START).await,
             Err(Refused::TooManyFromAddress)
         );
-        assert_eq!(
-            limits.may_sign_in("someone", ip(2), START).await.unwrap(),
-            Ok(())
-        );
+        assert_eq!(limits.may_sign_in("someone", ip(2), START).await, Ok(()));
         let later = START + secs(IP_WINDOW);
-        assert_eq!(
-            limits.may_sign_in("someone", ip(1), later).await.unwrap(),
-            Ok(())
-        );
+        assert_eq!(limits.may_sign_in("someone", ip(1), later).await, Ok(()));
     }
 
     #[actix_rt::test]
@@ -627,16 +646,16 @@ mod tests {
         let limits = limits().await;
         let host = |n: u16| IpAddr::from([0x2001, 0xdb8, 7, 7, n, 0, 0, 1]);
         for n in 0..CODE_TRIES as u16 {
-            assert_eq!(limits.may_try_code(host(n), 0).await.unwrap(), Ok(()));
-            limits.wrong_code(host(n), 0).await.unwrap();
+            assert_eq!(limits.may_try_code(host(n), 0).await, Ok(()));
+            limits.wrong_code(host(n), 0).await;
         }
         assert_eq!(
-            limits.may_try_code(host(999), 0).await.unwrap(),
+            limits.may_try_code(host(999), 0).await,
             Err(Refused::TooManyCodes),
             "any address in the same /64"
         );
         let other = IpAddr::from([0x2001, 0xdb8, 7, 8, 0, 0, 0, 1]);
-        assert_eq!(limits.may_try_code(other, 0).await.unwrap(), Ok(()));
+        assert_eq!(limits.may_try_code(other, 0).await, Ok(()));
     }
 
     #[actix_rt::test]
@@ -644,67 +663,62 @@ mod tests {
         let limits = limits().await;
         // Asking one account again and again, taking it back between.
         for _ in 0..SAME_ASKS {
-            assert_eq!(limits.may_ask_friend(1, 2, 0).await.unwrap(), Ok(()));
+            assert_eq!(limits.may_ask_friend(1, 2, 0).await, Ok(()));
         }
         assert_eq!(
-            limits.may_ask_friend(1, 2, 0).await.unwrap(),
+            limits.may_ask_friend(1, 2, 0).await,
             Err(Refused::AskedThemLately)
         );
         // Asking everyone.
         for to in 3..(3 + FRIEND_ASKS as i64 - SAME_ASKS as i64) {
-            assert_eq!(limits.may_ask_friend(1, to, 0).await.unwrap(), Ok(()));
+            assert_eq!(limits.may_ask_friend(1, to, 0).await, Ok(()));
         }
         assert_eq!(
-            limits.may_ask_friend(1, 999, 0).await.unwrap(),
+            limits.may_ask_friend(1, 999, 0).await,
             Err(Refused::TooManyAsks)
         );
-        assert_eq!(
-            limits.may_ask_friend(2, 1, 0).await.unwrap(),
-            Ok(()),
-            "others can"
-        );
+        assert_eq!(limits.may_ask_friend(2, 1, 0).await, Ok(()), "others can");
         let tomorrow = secs(SAME_ASK_WINDOW) + 1;
-        assert_eq!(limits.may_ask_friend(1, 2, tomorrow).await.unwrap(), Ok(()));
+        assert_eq!(limits.may_ask_friend(1, 2, tomorrow).await, Ok(()));
 
         for _ in 0..SAME_INVITES {
-            assert_eq!(limits.may_invite(1, 2, 0).await.unwrap(), Ok(()));
+            assert_eq!(limits.may_invite(1, 2, 0).await, Ok(()));
         }
         assert_eq!(
-            limits.may_invite(1, 2, 0).await.unwrap(),
+            limits.may_invite(1, 2, 0).await,
             Err(Refused::InvitedThemLately)
         );
         let later = secs(INVITE_WINDOW) + 1;
-        assert_eq!(limits.may_invite(1, 2, later).await.unwrap(), Ok(()));
+        assert_eq!(limits.may_invite(1, 2, later).await, Ok(()));
     }
 
     #[actix_rt::test]
     async fn every_try_to_make_an_account_counts() {
         let limits = limits().await;
         for _ in 0..SIGNUP_TRIES {
-            assert_eq!(limits.may_sign_up(ip(1), 0).await.unwrap(), Ok(()));
+            assert_eq!(limits.may_sign_up(ip(1), 0).await, Ok(()));
         }
         assert_eq!(
-            limits.may_sign_up(ip(1), 0).await.unwrap(),
+            limits.may_sign_up(ip(1), 0).await,
             Err(Refused::TooManySignUpTries),
             "taken names count too"
         );
         let later = secs(SIGNUP_TRY_WINDOW) + 1;
-        assert_eq!(limits.may_sign_up(ip(1), later).await.unwrap(), Ok(()));
+        assert_eq!(limits.may_sign_up(ip(1), later).await, Ok(()));
     }
 
     #[actix_rt::test]
     async fn one_address_makes_five_accounts_a_day() {
         let limits = limits().await;
         for _ in 0..SIGNUPS {
-            assert_eq!(limits.may_sign_up(ip(1), START).await.unwrap(), Ok(()));
-            limits.signed_up(ip(1), START).await.unwrap();
+            assert_eq!(limits.may_sign_up(ip(1), START).await, Ok(()));
+            limits.signed_up(ip(1), START).await;
         }
         assert_eq!(
-            limits.may_sign_up(ip(1), START).await.unwrap(),
+            limits.may_sign_up(ip(1), START).await,
             Err(Refused::TooManySignUps)
         );
         let tomorrow = START + secs(SIGNUP_WINDOW);
-        limits.tidy(tomorrow).await.unwrap();
-        assert_eq!(limits.may_sign_up(ip(1), tomorrow).await.unwrap(), Ok(()));
+        assert_eq!(limits.may_sign_up(ip(1), tomorrow).await, Ok(()));
     }
 }

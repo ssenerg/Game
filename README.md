@@ -72,9 +72,13 @@ no account on the machine, and quitting the game ends their connection at once.
   servers that turn it on (see [Chess](#chess)).
 - **Only the game.** Commands (`ssh host ls`), file transfer and port
   forwarding are refused with a message.
-- **Limits.** Connections are capped in total and per IP address. Logins time
-  out, idle players are logged out, and clients that stop reading are
-  disconnected.
+- **Limits.** Connections are capped in total and per IP address, and so is
+  how often one address opens new ones. Logins time out, idle players are
+  logged out, and clients that stop reading are disconnected.
+- **A cache.** The rate limits count in DragonflyDB, or any server that
+  speaks Redis's protocol, and reads such as the leaderboard are kept there
+  a while (`[cache]` in the settings). Without one, or while it doesn't
+  answer, each server counts in its own memory.
 
 ### Multiplayer
 
@@ -354,6 +358,11 @@ install -o root -g deploy -m 750 deploy/docker/deploy.sh /opt/apps/snaketui/
 To change the ports, put `SNAKETUI_PORT` or `SNAKETUI_ADMIN_PORT` in
 `/opt/apps/snaketui/.env`, owned the same way (see
 [`docker-compose.yml`](deploy/docker/docker-compose.yml)).
+
+`docker-compose.yml` runs DragonflyDB next to the game, for its rate limits
+and cache. Only the game reaches it, and nothing in it has to survive a
+restart. A deploy starts it if it isn't running, and leaves it running
+otherwise.
 
 **DNS.** Point the game's name, such as `play.example.com`, at the server
 with an `A` record. On Cloudflare, make it DNS only (a grey cloud).

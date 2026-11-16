@@ -9,6 +9,7 @@ pub mod accept;
 pub mod admin;
 pub mod auth;
 pub mod backend;
+pub mod cache;
 pub mod cluster;
 pub mod config;
 pub mod games;
@@ -44,6 +45,7 @@ use tracing::{info, warn};
 
 use crate::accept::{Limits, Worker};
 use crate::auth::{GuessLimits, Hasher};
+use crate::cache::Cache;
 use crate::cluster::Cluster;
 use crate::config::ServerConfig;
 use crate::lobby::LobbyActor;
@@ -66,6 +68,8 @@ pub struct Shared {
     pub cluster: Option<Arc<Cluster>>,
     pub ssh: Arc<russh::server::Config>,
     pub store: Store,
+    /// Where the rate limits count: DragonflyDB, or this server's memory.
+    pub cache: Cache,
     /// How far along stopping the server is.
     pub shutdown: watch::Sender<Stopping>,
     pub lobby: Addr<LobbyActor>,
@@ -126,7 +130,11 @@ pub async fn serve(
     host_key: PrivateKey,
     stop: impl Future<Output = ()>,
 ) -> Result<()> {
-    let store = Store::open(&cfg.database).await?;
+    let cache = match &cfg.cache {
+        Some(cache) => Cache::connect(cache)?,
+        None => Cache::memory(),
+    };
+    let store = Store::open(&cfg.database).await?.with_cache(cache.clone());
     let limits = Limits::new(cfg.max_sessions, cfg.max_sessions_per_ip);
     let room_arbiters: Vec<Arbiter> = (0..cfg.room_threads()).map(|_| Arbiter::new()).collect();
     let rooms = LocalRooms::default();
@@ -170,7 +178,7 @@ pub async fn serve(
             sessions: Arc::new(AtomicUsize::new(0)),
         })
         .collect();
-    let guesses = GuessLimits::new(store.clone());
+    let guesses = GuessLimits::new(cache.clone());
     let shared = Arc::new(Shared {
         ssh: Arc::new(ssh::config(host_key)),
         proxies: Trusted::parse(&cfg.trusted_proxies)?,
@@ -180,6 +188,7 @@ pub async fn serve(
         rooms,
         cluster: cluster.clone(),
         store,
+        cache,
         shutdown: watch::channel(Stopping::No).0,
         lobby,
         matchmaker,
@@ -195,17 +204,14 @@ pub async fn serve(
             1
         }),
     });
-    // Forget old wrong guesses now and then, so the limits' tables stay
-    // small.
+    // Forget long-gone guests now and then. The limits' counts run out in
+    // the cache by themselves.
     let tidying = actix_rt::spawn({
-        let (guesses, store) = (shared.guesses.clone(), shared.store.clone());
+        let store = shared.store.clone();
         async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(600)).await;
                 let now = store::now();
-                if let Err(e) = guesses.tidy(now).await {
-                    warn!(error = %e, "couldn't tidy the guessing limits");
-                }
                 let days = |n: i64| now - n * 24 * 60 * 60;
                 if let Err(e) = store
                     .tidy_guests(days(GUESTS_QUIET_DAYS), days(GUESTS_GONE_DAYS))

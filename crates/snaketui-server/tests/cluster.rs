@@ -13,13 +13,21 @@ use common::accounts::*;
 use common::process::{MatchmakerProcess, ServerProcess};
 use common::rooms::*;
 use common::*;
+use snaketui_server::config::{CacheConfig, ServerConfig};
 use tokio::time::Instant;
 
 async fn two_servers() -> (TestServer, TestServer) {
     let db = snaketui_test_services::postgres().await;
-    let a = TestServer::with(|c| c.database = db.clone());
-    let b = TestServer::with(|c| c.database = db.clone());
-    (a, b)
+    // One cache for both, as for servers of a cluster.
+    let cache = CacheConfig {
+        url: snaketui_test_services::dragonfly(),
+        prefix: format!("t{:x}", rand::random::<u64>()),
+    };
+    let shared = |c: &mut ServerConfig| {
+        c.database = db.clone();
+        c.cache = Some(cache.clone());
+    };
+    (TestServer::with(shared), TestServer::with(shared))
 }
 
 #[tokio::test]
@@ -65,13 +73,14 @@ async fn a_username_locked_on_one_server_is_locked_on_all() {
     q.wait_for("Too many wrong tries for that name").await;
 }
 
-/// Servers in one cluster, one in each of `regions`, with a database and
-/// NATS names of their own, and `extra` settings. Also gives settings a
-/// matchmaker for the cluster can use.
+/// Servers in one cluster, one in each of `regions`, with a database, and
+/// NATS names and cache keys, of their own, and `extra` settings. Also
+/// gives settings a matchmaker for the cluster can use.
 async fn cluster_in(regions: &[&str], extra: &str) -> (Vec<ServerProcess>, String) {
     static N: AtomicU32 = AtomicU32::new(0);
     let db = snaketui_test_services::postgres().await;
     let nats = snaketui_test_services::nats();
+    let cache = snaketui_test_services::dragonfly();
     let name = format!(
         "t{}_{}",
         std::process::id(),
@@ -79,7 +88,8 @@ async fn cluster_in(regions: &[&str], extra: &str) -> (Vec<ServerProcess>, Strin
     );
     let settings = |region: &str| {
         format!(
-            "database = \"{db}\"\n{extra}\n[cluster]\nnats = \"{nats}\"\nname = \"{name}\"\nregion = \"{region}\"\n"
+            "database = \"{db}\"\n{extra}\n[cluster]\nnats = \"{nats}\"\nname = \"{name}\"\nregion = \"{region}\"\n\
+             [cache]\nurl = \"{cache}\"\nprefix = \"{name}\"\n"
         )
     };
     let mut servers: Vec<ServerProcess> = regions
@@ -480,7 +490,7 @@ async fn five_thousand_players_on_two_servers() {
     const PLAYERS: usize = 5000;
     snaketui_loadbot::raise_open_files();
     let extra = "workers = 0\nmax_sessions = 4000\nmax_sessions_per_ip = 10000\n\
-                 admin_listen = \"127.0.0.1:0\"\n";
+                 new_sessions_per_ip_per_minute = 0\nadmin_listen = \"127.0.0.1:0\"\n";
     let (servers, settings) = cluster_in(&["local", "local"], extra).await;
     let _queue = MatchmakerProcess::start(&settings, 1.0);
     let admins: Vec<SocketAddr> = servers.iter().map(|s| s.admin().unwrap()).collect();

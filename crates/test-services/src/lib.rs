@@ -1,12 +1,13 @@
-//! Postgres and NATS for SnakeTUI's tests.
+//! Postgres, NATS and DragonflyDB for SnakeTUI's tests.
 //!
 //! The first test that asks for one starts it in a Docker container, which
 //! the rest of the test process shares. A watcher removes the container once
 //! the process is gone, however it ends.
 //!
 //! To use servers you already run instead, set `SNAKETUI_TEST_POSTGRES` to
-//! the URL of a database whose user may create databases, and
-//! `SNAKETUI_TEST_NATS` to a NATS server.
+//! the URL of a database whose user may create databases,
+//! `SNAKETUI_TEST_NATS` to a NATS server, and `SNAKETUI_TEST_DRAGONFLY` to a
+//! DragonflyDB or Redis server.
 
 use std::io::Read;
 use std::net::TcpStream;
@@ -19,6 +20,7 @@ use sqlx::{AssertSqlSafe, Connection, PgConnection};
 
 const POSTGRES_IMAGE: &str = "postgres:18-alpine";
 const NATS_IMAGE: &str = "nats:2.12-alpine";
+const DRAGONFLY_IMAGE: &str = "docker.dragonflydb.io/dragonflydb/dragonfly:v2.0.2";
 const PASSWORD: &str = "snaketui";
 /// How long a server may take to start.
 const START_LIMIT: Duration = Duration::from_secs(60);
@@ -87,6 +89,26 @@ pub fn nats() -> String {
                 );
                 wait_for_nats(port);
                 format!("nats://snaketui:p%40ss%2Fw%3Ard@127.0.0.1:{port}")
+            })
+        })
+        .clone()
+}
+
+/// The URL of a DragonflyDB server, shared by the whole test process.
+/// Tests keep apart by using keys of their own.
+pub fn dragonfly() -> String {
+    static SERVER: OnceLock<String> = OnceLock::new();
+    SERVER
+        .get_or_init(|| {
+            std::env::var("SNAKETUI_TEST_DRAGONFLY").unwrap_or_else(|_| {
+                let port = start(
+                    DRAGONFLY_IMAGE,
+                    6379,
+                    &[],
+                    &["--proactor_threads=1", "--maxmemory=256mb"],
+                );
+                wait_for_dragonfly(port);
+                format!("redis://127.0.0.1:{port}")
             })
         })
         .clone()
@@ -178,6 +200,26 @@ fn wait_for_nats(port: u16) {
         std::thread::sleep(Duration::from_millis(100));
     }
     panic!("NATS on port {port} never came up");
+}
+
+/// Waits until DragonflyDB answers a PING, for the same reason as
+/// [`wait_for_nats`].
+fn wait_for_dragonfly(port: u16) {
+    let deadline = Instant::now() + START_LIMIT;
+    while Instant::now() < deadline {
+        if let Ok(mut conn) = TcpStream::connect(("127.0.0.1", port)) {
+            let _ = conn.set_read_timeout(Some(Duration::from_secs(1)));
+            let mut pong = [0; 5];
+            if std::io::Write::write_all(&mut conn, b"PING\r\n").is_ok()
+                && conn.read_exact(&mut pong).is_ok()
+                && &pong == b"+PONG"
+            {
+                return;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!("DragonflyDB on port {port} never came up");
 }
 
 /// `url` with its database swapped for `name`.

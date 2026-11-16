@@ -238,6 +238,33 @@ async fn too_many_connections_from_one_address_are_turned_away() {
 }
 
 #[tokio::test]
+async fn an_address_connecting_too_often_is_turned_away_for_a_while() {
+    let server = TestServer::with(|c| c.new_sessions_per_ip_per_minute = 3);
+    let key = new_key();
+    for _ in 0..3 {
+        let mut p = Player::join(server.addr, Login::Key(&key), 100, 40).await;
+        p.wait_for("Quick play").await;
+    }
+    let fourth = client::connect(
+        Arc::new(client::Config::default()),
+        server.addr,
+        TrustAnyHost,
+    );
+    assert!(
+        timeout(Duration::from_secs(3), fourth)
+            .await
+            .unwrap()
+            .is_err(),
+        "turned away before the key exchange"
+    );
+    let (_, metrics) = http_get(server.admin, "/metrics").await;
+    assert_eq!(
+        number(&metrics, "snaketui_turned_away_too_often_total"),
+        1.0
+    );
+}
+
+#[tokio::test]
 async fn stopping_the_server_tells_players_logs_them_out_and_keeps_their_records() {
     let server = TestServer::start();
     let key = new_key();

@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use actix::Actor;
@@ -17,6 +17,11 @@ use crate::ssh::ConnHandler;
 
 /// A trusted proxy has this long to send its PROXY header.
 const PROXY_HEADER_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+/// New connections from one address count for this long.
+const CONNECTING_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Connections turned away for coming too often from one address.
+pub static TOO_OFTEN: AtomicU64 = AtomicU64::new(0);
 
 /// How many connections are open, in total and per IP address.
 pub struct Limits {
@@ -160,9 +165,32 @@ pub async fn accept_loop(
                 return;
             };
             admission.worker = Some(sessions);
+            if !may_connect(&shared, peer.ip()).await {
+                TOO_OFTEN.fetch_add(1, Ordering::Relaxed);
+                return debug!(%peer, "connecting too often; turned away");
+            }
             serve(stream, peer, shared, admission).await;
         });
     }
+}
+
+/// Whether `ip` may open another connection: at most
+/// `new_sessions_per_ip_per_minute` a minute, counted in the cache, so
+/// every server sharing it counts the same. Those turned away count too,
+/// so an address that keeps trying stays out until it stops a while.
+async fn may_connect(shared: &Shared, ip: IpAddr) -> bool {
+    let most = shared.cfg.new_sessions_per_ip_per_minute;
+    if most == 0 {
+        return true;
+    }
+    let now = crate::store::now();
+    let window = CONNECTING_WINDOW.as_secs() as i64;
+    let key = format!("connect:{}", counted_as(ip));
+    let tries = shared
+        .cache
+        .note_and_count(&key, now, CONNECTING_WINDOW, now - window)
+        .await;
+    tries <= i64::from(most)
 }
 
 /// Reads the PROXY header a trusted proxy sends first, then admits the

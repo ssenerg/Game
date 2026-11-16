@@ -34,6 +34,11 @@ room_threads = 0
 max_sessions = 2000
 max_sessions_per_ip = 10
 
+# New connections a single IP address may open in a minute, those turned
+# away included, so one that keeps trying stays out until it stops a while.
+# Each costs the server a key exchange. 0 for no limit.
+new_sessions_per_ip_per_minute = 30
+
 # Load balancers, such as HAProxy, that put a PROXY header (version 1 or 2)
 # before each connection to say who the player really is, so the per-IP
 # limits count players rather than the balancer. Addresses, or networks
@@ -72,3 +77,16 @@ enabled_games = ["snake"]
 # name = "snaketui"
 # # Where this server is, for matchmaking.
 # region = "local"
+
+# Where the rate limits count (wrong passwords, new accounts, room codes,
+# friend requests, invites, new connections), and where reads such as the
+# leaderboard are kept a while: DragonflyDB, or any server that speaks
+# Redis's protocol, with redis:// URLs. Servers of a cluster share one, so
+# they count the same. Without it, or while it doesn't answer, each server
+# counts in its own memory, and a restart forgets the counts.
+#
+# [cache]
+# url = "redis://127.0.0.1:6379"
+# # Before every key, so servers that share a cache but not players keep
+# # apart.
+# prefix = "snaketui"

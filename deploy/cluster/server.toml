@@ -16,3 +16,7 @@ trusted_proxies = ["10.213.77.0/24"]
 nats = "nats://snaketui:snaketui@nats:4222"
 name = "snaketui"
 region = "local"
+
+# One cache for every server, so the rate limits count the same on each.
+[cache]
+url = "redis://dragonfly:6379"

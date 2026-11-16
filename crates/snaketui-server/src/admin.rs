@@ -115,6 +115,14 @@ fn metrics(shared: &Shared, limits: &Limits) -> String {
         "1 while the server is stopping.",
         f64::from(u8::from(draining)),
     );
+    if let Some(up) = shared.cache.up() {
+        gauge(
+            "snaketui_cache_up",
+            "1 while the cache answers; 0 while this server counts in its own \
+             memory instead.",
+            f64::from(u8::from(up)),
+        );
+    }
     if let Some(cluster) = &shared.cluster {
         gauge(
             "snaketui_cluster_peers",
@@ -138,6 +146,18 @@ fn metrics(shared: &Shared, limits: &Limits) -> String {
         "Bytes sent to players again because they were lost. Over \
          snaketui_tcp_sent_bytes_total, the share lost.",
         TCP_RESENT.load(Ordering::Relaxed),
+    );
+    counter(
+        "snaketui_turned_away_too_often_total",
+        "Connections turned away for coming too often from one address \
+         (new_sessions_per_ip_per_minute).",
+        crate::accept::TOO_OFTEN.load(Ordering::Relaxed),
+    );
+    counter(
+        "snaketui_cache_fallbacks_total",
+        "Requests to the cache answered from this server's memory, as it \
+         didn't answer.",
+        crate::cache::FALLBACKS.load(Ordering::Relaxed),
     );
     counter(
         "snaketui_frame_holds_total",

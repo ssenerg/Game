@@ -36,6 +36,10 @@ pub struct ServerConfig {
     /// Connections at once, in total and from one IP address.
     pub max_sessions: usize,
     pub max_sessions_per_ip: usize,
+    /// New connections one IP address may open in a minute, those turned
+    /// away included, so one that keeps trying stays out; 0 for no limit.
+    /// Each costs this server a key exchange.
+    pub new_sessions_per_ip_per_minute: u32,
     /// Seconds a connection may take to sign in and open the game.
     pub login_timeout_secs: u64,
     /// Seconds without a key press, outside a running game, before a player
@@ -53,6 +57,9 @@ pub struct ServerConfig {
     /// Servers that share rooms, friends and the queue. Without it, this
     /// server plays on its own.
     pub cluster: Option<ClusterConfig>,
+    /// Where the rate limits count, and reads such as the leaderboard are
+    /// kept a while. Without it, in this server's memory.
+    pub cache: Option<CacheConfig>,
     /// Tests only: every room's seed, so its boards are known in advance.
     #[serde(skip)]
     pub room_seed: Option<u64>,
@@ -70,12 +77,14 @@ impl Default for ServerConfig {
             trusted_proxies: Vec::new(),
             max_sessions: 2000,
             max_sessions_per_ip: 10,
+            new_sessions_per_ip_per_minute: 30,
             login_timeout_secs: 30,
             idle_timeout_secs: 600,
             stall_timeout_secs: 20,
             drain_timeout_secs: 200,
             enabled_games: vec!["snake".to_string()],
             cluster: None,
+            cache: None,
             room_seed: None,
         }
     }
@@ -97,6 +106,24 @@ pub struct ClusterConfig {
     /// their region first.
     #[serde(default = "default_region")]
     pub region: String,
+}
+
+/// `[cache]`: DragonflyDB, or any server that speaks Redis's protocol.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CacheConfig {
+    /// For example `redis://dragonfly:6379`, or
+    /// `redis://:PASSWORD@10.0.0.6:6379` with a password. While it doesn't
+    /// answer, this server counts in its own memory.
+    pub url: String,
+    /// Before every key, so servers that share a cache but not players keep
+    /// apart. Letters, digits, `_` and `-`.
+    #[serde(default = "default_cache_prefix")]
+    pub prefix: String,
+}
+
+fn default_cache_prefix() -> String {
+    "snaketui".into()
 }
 
 fn default_cluster_name() -> String {
@@ -142,14 +169,19 @@ impl ServerConfig {
         if self.games().is_empty() {
             bail!("enabled_games needs at least one game");
         }
-        let Some(cluster) = &self.cluster else {
-            return Ok(());
-        };
         let plain = |s: &str| {
             !s.is_empty()
                 && s.len() <= 32
                 && s.chars()
                     .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        };
+        if let Some(cache) = &self.cache
+            && !plain(&cache.prefix)
+        {
+            bail!("cache.prefix may only have letters, digits, _ and -");
+        }
+        let Some(cluster) = &self.cluster else {
+            return Ok(());
         };
         if !plain(&cluster.name) {
             bail!("cluster.name may only have letters, digits, _ and -");
@@ -230,6 +262,25 @@ mod tests {
         let cfg: ServerConfig = toml::from_str(image).unwrap();
         assert!(cfg.check().is_ok());
         assert_eq!(cfg.games(), [GameId::Snake, GameId::Chess]);
+        let cache = cfg.cache.expect("docker-compose.yml's DragonflyDB");
+        assert_eq!(
+            (cache.url.as_str(), cache.prefix.as_str()),
+            ("redis://dragonfly:6379", "snaketui")
+        );
+    }
+
+    #[test]
+    fn a_cache_is_optional_and_its_prefix_plain() {
+        let cfg = |text: &str| toml::from_str::<ServerConfig>(text).unwrap();
+        assert!(cfg("").cache.is_none(), "memory alone");
+        assert_eq!(cfg("").new_sessions_per_ip_per_minute, 30);
+        let cache = "[cache]\nurl = \"redis://cache:6379\"\n";
+        assert!(cfg(cache).check().is_ok());
+        assert!(cfg(&format!("{cache}prefix = \"a b\"\n")).check().is_err());
+        assert!(
+            toml::from_str::<ServerConfig>("[cache]\nprefix = \"x\"\n").is_err(),
+            "a url"
+        );
     }
 
     #[test]

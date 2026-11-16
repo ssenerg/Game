@@ -269,7 +269,7 @@ impl SessionActor {
                 Ok(attempt) => attempt,
                 Err(refused) => return anyhow::Ok(SignedUp::Refused(refused)),
             };
-            if let Err(refused) = guesses.may_sign_up(ip, now()).await? {
+            if let Err(refused) = guesses.may_sign_up(ip, now()).await {
                 return Ok(SignedUp::Refused(refused));
             }
             // A taken name costs no hashing.
@@ -283,7 +283,7 @@ impl SessionActor {
             let Some(account) = made else {
                 return Ok(SignedUp::Taken);
             };
-            guesses.signed_up(ip, now()).await?;
+            guesses.signed_up(ip, now()).await;
             Ok(SignedUp::Made(account))
         };
         ctx.spawn(made.into_actor(self).map(move |made, act, ctx| {
@@ -329,17 +329,17 @@ impl SessionActor {
                 Ok(attempt) => attempt,
                 Err(refused) => return anyhow::Ok(SignedIn::Refused(refused)),
             };
-            if let Err(refused) = guesses.may_sign_in(&username, ip, now()).await? {
+            if let Err(refused) = guesses.may_sign_in(&username, ip, now()).await {
                 return Ok(SignedIn::Refused(refused));
             }
             let found = store.find_account(&username).await?;
             let (account, hash) = found.map_or((None, None), |(a, h)| (Some(a), Some(h)));
             let right = hasher.verify(password.into_inner(), hash).await?;
             let Some(account) = account.filter(|_| right) else {
-                guesses.failed(&username, ip, now()).await?;
+                guesses.failed(&username, ip, now()).await;
                 return Ok(SignedIn::Wrong);
             };
-            guesses.succeeded(&username).await?;
+            guesses.succeeded(&username).await;
             if let Some(key) = key {
                 store.remember_key(account.id, &key).await?;
             }
@@ -464,15 +464,15 @@ impl SessionActor {
                 Ok(attempt) => attempt,
                 Err(refused) => return anyhow::Ok(Err(refused.message())),
             };
-            if let Err(refused) = guesses.may_sign_in(&username, ip, now()).await? {
+            if let Err(refused) = guesses.may_sign_in(&username, ip, now()).await {
                 return Ok(Err(refused.message()));
             }
             let hash = store.find_account(&username).await?.map(|(_, hash)| hash);
             if !hasher.verify(current.into_inner(), hash).await? {
-                guesses.failed(&username, ip, now()).await?;
+                guesses.failed(&username, ip, now()).await;
                 return Ok(Err("That's not your current password."));
             }
-            guesses.succeeded(&username).await?;
+            guesses.succeeded(&username).await;
             let hash = hasher.hash(password.into_inner()).await?;
             store.set_password(id, &hash).await?;
             store.forget_keys_but(id, keep.as_deref()).await?;
@@ -698,7 +698,7 @@ impl SessionActor {
             if them.id == me.id {
                 return Ok("That's you.".to_string());
             }
-            if let Err(refused) = guesses.may_ask_friend(me.id, them.id, now()).await? {
+            if let Err(refused) = guesses.may_ask_friend(me.id, them.id, now()).await {
                 return Ok(refused.message().to_string());
             }
             let who = them.username;
@@ -867,7 +867,7 @@ impl SessionActor {
             if !store.are_friends(me.id, them.id).await? {
                 return Ok(Err("You can only invite friends.".to_string()));
             }
-            if let Err(refused) = guesses.may_invite(me.id, them.id, now()).await? {
+            if let Err(refused) = guesses.may_invite(me.id, them.id, now()).await {
                 return Ok(Err(refused.message().to_string()));
             }
             let online = presence.send(StatusOf(vec![them.id])).await?;

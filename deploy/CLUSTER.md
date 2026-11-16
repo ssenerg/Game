@@ -12,8 +12,9 @@ A cluster adds a few pieces next to the game servers:
 
 | Piece | What it does |
 |---|---|
-| **Postgres** 16 or newer | Accounts, friends, ratings, room codes and guessing limits, for every server. |
+| **Postgres** 16 or newer | Accounts, friends, ratings and room codes, for every server. |
 | **NATS** 2.10 or newer | Messages between servers: who's alive, players in rooms on another server, friends and invites. Plain NATS is enough; JetStream isn't used. |
+| **DragonflyDB** | Optional, but without it each server keeps its own rate limits: the counts of wrong passwords, new accounts, room codes, friend requests, invites and new connections. Shared, they count the same wherever a player connects. It also keeps the leaderboard a while. Redis or Valkey work too. |
 | **snaketui-matchmaker** | The quick-play queue. Exactly one runs per cluster. |
 | **HAProxy** | Optional. Spreads a region's players over its servers and keeps them away from a server that is stopping. |
 
@@ -43,7 +44,7 @@ This guide uses one region, `eu`, with these machines on a private network,
 
 | Machine | Private address | Runs |
 |---|---|---|
-| `db` | 10.0.0.5 | Postgres, NATS, snaketui-matchmaker |
+| `db` | 10.0.0.5 | Postgres, NATS, DragonflyDB, snaketui-matchmaker |
 | `lb-eu` | 10.0.0.10, and a public address | HAProxy |
 | `game-eu-1` | 10.0.0.11 | snaketui-server |
 | `game-eu-2` | 10.0.0.12 | snaketui-server |
@@ -51,7 +52,7 @@ This guide uses one region, `eu`, with these machines on a private network,
 Every machine runs Ubuntu 24.04.
 
 **Another region** gets its own load balancer and game servers, with
-`region` set to its own name (step 4). They use the same `db`, so they need a
+`region` set to its own name (step 5). They use the same `db`, so they need a
 private link to it, such as your provider's network peering or a WireGuard
 VPN. NATS here has a password but no encryption: don't let it cross the
 internet in the open.
@@ -140,11 +141,31 @@ sudo systemctl restart nats-server
 sudo ufw allow from 10.0.0.0/24 to any port 4222 proto tcp comment 'nats'
 ```
 
-## 4. The game servers
+## 4. DragonflyDB
+
+On `db`, with Docker installed, run it on the private network with a
+password. Nothing in it has to survive a restart: no volume, no snapshots.
+
+```bash
+sudo docker run -d --name dragonfly --restart unless-stopped \
+  -p 10.0.0.5:6379:6379 --user 999:999 --tmpfs /data:uid=999,gid=999 \
+  --ulimit memlock=-1 --read-only --cap-drop ALL \
+  docker.dragonflydb.io/dragonflydb/dragonfly:v2.0.2 \
+  --proactor_threads=1 --maxmemory=256mb --dbfilename= \
+  --requirepass CACHE_PASSWORD
+```
+
+Whoever reaches it can lift anyone's rate limits, so keep it on the private
+network like NATS: Docker publishes the port past ufw, so the address in
+`-p` is what keeps it there. Each server's `[cache]` names it (below).
+While it doesn't answer, servers count in their own memory and warn once a
+minute, and `snaketui_cache_up` in their metrics is 0.
+
+## 5. The game servers
 
 On each game server, follow [INSTALL.md](INSTALL.md) steps 2 to 6: they move
 your admin login to port 2222 and install the game. Point DNS at the load
-balancer instead (step 8 here), not at each server.
+balancer instead (step 9 here), not at each server.
 
 Then replace `/etc/snaketui/server.toml` with these settings. Each server
 has its own `admin_listen` address. Everything else is the same on every
@@ -162,6 +183,9 @@ trusted_proxies = ["10.0.0.10"]
 nats = "nats://snaketui:NATS_PASSWORD@10.0.0.5:4222"
 name = "snaketui"
 region = "eu"
+
+[cache]
+url = "redis://:CACHE_PASSWORD@10.0.0.5:6379"
 ```
 
 [server.toml.example](server.toml.example) explains every setting. `name`
@@ -189,7 +213,7 @@ sudo ufw delete allow 22/tcp
 sudo ufw allow from 10.0.0.10 to any port 22 proto tcp comment 'snaketui via haproxy'
 ```
 
-## 5. One host key for every server
+## 6. One host key for every server
 
 Players check the game's host key, so every server must show the same one.
 Otherwise a player who lands on another server gets a "REMOTE HOST
@@ -225,7 +249,7 @@ Check that every server prints the same fingerprint:
 sudo -u snaketui snaketui-server --config /etc/snaketui/server.toml --make-host-key
 ```
 
-## 6. The matchmaker
+## 7. The matchmaker
 
 Quick play needs exactly one `snaketui-matchmaker` for the whole cluster. It
 only talks to NATS, so it can run anywhere; here it runs on `db`.
@@ -253,7 +277,7 @@ working. When it's back, the servers send it their waiting players again, so
 nobody loses their place. Don't run two: they would each match the same
 players.
 
-## 7. HAProxy
+## 8. HAProxy
 
 On `lb-eu`, first move your admin login to port 2222, as in INSTALL.md steps
 2 to 4, so HAProxy can take port 22. Then:
@@ -320,7 +344,7 @@ addresses in turn, so a stopping server's players reach another. Players
 are spread less evenly, though, and each game server needs port 22 open to
 everyone.
 
-## 8. DNS
+## 9. DNS
 
 Give each region a name pointing at its load balancer's public address, for
 example `eu.play.example.com`. With one region, `play.example.com` is
@@ -331,7 +355,7 @@ geolocation records, or Cloudflare Load Balancing) can answer
 `play.example.com` with the nearest region. Every server has the same host
 key, so players see the same fingerprint under every name.
 
-## 9. Check
+## 10. Check
 
 On `lb-eu`, each game server says it's serving:
 
@@ -369,7 +393,7 @@ curl -s http://10.0.0.11:9022/metrics | grep '^snaketui_players'
 
 The command returns once that's done.
 
-To add a server, set it up as in steps 4 and 5, add its `server` line to the
+To add a server, set it up as in steps 5 and 6, add its `server` line to the
 region's `haproxy.cfg`, and run `sudo systemctl reload haproxy`. A reload
 keeps everyone connected. A `restart` of HAProxy drops every player in the
 region.
@@ -412,6 +436,8 @@ format:
 | `snaketui_queue_waiting` | Players waiting for a quick-play match, in the whole cluster. |
 | `snaketui_draining` | 1 while the server is stopping. |
 | `snaketui_cluster_peers` | Other servers it heard from in the last 2 seconds. |
+| `snaketui_cache_up` | 1 while DragonflyDB answers; 0 while the server counts in its own memory. |
+| `snaketui_turned_away_too_often_total` | Connections turned away for coming too often from one address. |
 | `snaketui_tick_lag_seconds` | A histogram of how late room ticks ran. Below 0.005 s at the 99th percentile is normal. |
 | `snaketui_ping_seconds` | A histogram of players' round trips to this server, timed every 2 seconds. Players see a turn this long after the key, plus up to one tick. |
 | `snaketui_tcp_rtt_seconds` | A histogram of the kernel's round trips for players' connections, read every 2 seconds. Linux only, like the three below. |
@@ -455,5 +481,5 @@ them into Postgres yet.
 | `snaketui_cluster_peers` is 0, and room codes from one server aren't found on another | The servers use a different `cluster.name` or NATS, or run different releases. |
 | Quick play never finds a match, but private rooms work | The matchmaker isn't running: `systemctl status snaketui-matchmaker` on `db`. |
 | Players through HAProxy are cut off at once | A game server only reads PROXY headers from `trusted_proxies`, and needs one from each of them. Check that it lists the load balancer's private address, and that `haproxy.cfg` has `send-proxy-v2`. With `RUST_LOG=snaketui_server=debug` (INSTALL.md), the log says `a bad PROXY header` or `no PROXY header in time`. |
-| Players get "REMOTE HOST IDENTIFICATION HAS CHANGED" now and then | The servers have different host keys. Repeat step 5. |
+| Players get "REMOTE HOST IDENTIFICATION HAS CHANGED" now and then | The servers have different host keys. Repeat step 6. |
 | A player sees "Too many wrong tries for that name" | The limits are as in INSTALL.md, shared by every server. To unlock a name at once, run `sudo -u postgres psql snaketui -c "DELETE FROM name_locks WHERE name = 'alice'"` on `db`, with the name in lowercase. |

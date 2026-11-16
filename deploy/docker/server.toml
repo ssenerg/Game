@@ -14,3 +14,9 @@ database = "sqlite:///var/lib/snaketui/snaketui.db"
 
 # Snake and chess: new players pick one, and `ssh chess@host` opens chess.
 enabled_games = ["snake", "chess"]
+
+# docker-compose.yml's DragonflyDB: the rate limits count there, and reads
+# such as the leaderboard are kept there a while. While it doesn't answer,
+# the game counts in its own memory, and warns about it once a minute.
+[cache]
+url = "redis://dragonfly:6379"

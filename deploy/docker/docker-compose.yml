@@ -18,6 +18,9 @@ services:
       dockerfile: deploy/docker/Dockerfile
     image: snaketui
     restart: unless-stopped
+    # Not "healthy": the game plays without it, counting in its own memory.
+    depends_on:
+      - dragonfly
     ports:
       # Docker keeps players' own addresses, which the per-IP limits count.
       # It also opens the port past ufw. IPv4 only: this network has no
@@ -45,6 +48,25 @@ services:
     # Rounds in play finish before it stops (drain_timeout_secs, 200 by
     # default).
     stop_grace_period: 230s
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+
+  # The rate limits' counts, and reads such as the leaderboard, for a while:
+  # nothing that has to outlive it. Only the game reaches it, on this
+  # project's network.
+  dragonfly:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:v2.0.2
+    restart: unless-stopped
+    # One thread is plenty; no snapshots, as nothing in it must survive.
+    command: ["--proactor_threads=1", "--maxmemory=256mb", "--dbfilename="]
+    # Its own user from the start, so it never needs root to hand /data over.
+    user: "999:999"
+    tmpfs:
+      - /data:uid=999,gid=999
+    ulimits:
+      memlock: -1
     read_only: true
     cap_drop: [ALL]
     security_opt:
