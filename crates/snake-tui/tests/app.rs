@@ -110,6 +110,7 @@ fn online_single_player_goes_back_home_instead_of_quitting() {
     assert_eq!(snake(&app).screen, SnakeScreen::Menu);
     assert_eq!(app.handle(Key::Char('q')), []);
     assert_eq!(app.screen, Screen::Home { selected: 0 });
+    assert_eq!(app.handle(Key::Char('q')), [], "home asks first");
     assert_eq!(app.handle(Key::Char('q')), [Effect::Quit]);
 }
 
@@ -575,10 +576,12 @@ fn friends_in_a_game_can_be_watched_and_left() {
     assert_eq!(app.screen, Screen::Friends { selected: 0 });
     assert!(!app.in_room());
 
-    // A game that ends sends the watcher home, saying so.
+    // A game that ends sends the watcher back to their friends too,
+    // saying so.
     app.screen = Screen::JoiningToWatch;
     app.watch_room(9, "bob".into(), matched_view());
-    app.room_closed(None);
+    assert_eq!(app.room_closed(None), [Effect::LoadFriends]);
+    assert_eq!(app.screen, Screen::Friends { selected: 0 });
     assert_eq!(notice(&app), Some("That game is over."));
 }
 

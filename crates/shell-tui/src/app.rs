@@ -109,7 +109,10 @@ pub enum Effect {
     /// Answer with [`App::signed_out`].
     SignOut,
     /// Answer with [`App::password_changed`] or [`App::form_failed`].
-    ChangePassword(Secret),
+    ChangePassword {
+        current: Secret,
+        password: Secret,
+    },
     /// Stop remembering the account by this key; answer with
     /// [`App::set_keys`].
     ForgetKey(String),
@@ -403,6 +406,10 @@ impl App {
             effects.push(Effect::Quit);
             return;
         }
+        // Asking to quit holds only while q is pressed again, right away.
+        if key != Key::Char('q') {
+            self.online.confirm_quit = false;
+        }
         if self.invite_key(key, effects) {
             return;
         }
@@ -412,7 +419,13 @@ impl App {
             Screen::Input(field) => self.input_key(field, key, effects),
             Screen::Finding => self.finding_key(key, effects),
             // Nothing to do until the room answers.
-            Screen::Joining { .. } | Screen::JoiningToWatch | Screen::JoiningBots => {}
+            // Waiting for the room: Esc gives up, and a seat that comes
+            // after is handed back.
+            Screen::Joining { .. } | Screen::JoiningToWatch | Screen::JoiningBots => {
+                if key == Key::Esc {
+                    self.stop_joining();
+                }
+            }
             Screen::Room => self.room_key(raw, effects),
             Screen::Form(kind) => self.form_key(kind, key, effects),
             Screen::Account { selected } => self.account_key(selected, key, effects),
@@ -495,6 +508,7 @@ impl App {
         self.screen = Screen::Home { selected };
         self.online.notice = notice;
         self.online.confirm_small = false;
+        self.online.confirm_quit = false;
     }
 
     /// The game picker, at the open game.
@@ -506,6 +520,7 @@ impl App {
     }
 
     fn picker_key(&mut self, selected: usize, key: Key, effects: &mut Vec<Effect>) {
+        let asked = std::mem::take(&mut self.online.confirm_quit);
         if let Some(selected) = key.step(selected, self.games.len()) {
             self.screen = Screen::Picker { selected };
             return;
@@ -517,7 +532,7 @@ impl App {
                 self.online.notice = None;
             }
             Key::Esc | Key::Char('q') if self.opened => self.go_home(HomeItem::Games, None),
-            Key::Esc | Key::Char('q') => effects.push(Effect::Quit),
+            Key::Char('q') => self.ask_to_quit(asked, effects),
             _ => {}
         }
     }
@@ -544,10 +559,25 @@ impl App {
         self.online.invite.is_some() && !self.busy_playing()
     }
 
-    /// Enter accepts a showing invite and Esc dismisses it. Returns whether
-    /// the key was used.
+    /// Whether Enter and Esc answer a showing invite here: on screens where
+    /// they mean nothing that matters, so pressing Enter to get ready, or
+    /// to fill in a form, never takes the player off to a friend's room.
+    pub fn invite_answerable(&self) -> bool {
+        matches!(
+            self.screen,
+            Screen::Picker { .. }
+                | Screen::Home { .. }
+                | Screen::Finding
+                | Screen::Account { .. }
+                | Screen::Friends { .. }
+                | Screen::Leaderboard { .. }
+        )
+    }
+
+    /// Enter accepts a showing invite and Esc dismisses it, where they
+    /// may. Returns whether the key was used.
     fn invite_key(&mut self, key: Key, effects: &mut Vec<Effect>) -> bool {
-        if !self.invite_showing() {
+        if !self.invite_showing() || !self.invite_answerable() {
             return false;
         }
         match key {
@@ -575,7 +605,8 @@ impl App {
 
     fn home_key(&mut self, selected: usize, key: Key, effects: &mut Vec<Effect>) {
         let items = self.home_items();
-        let had_notice = self.online.notice.take().is_some();
+        self.online.notice = None;
+        let quitting = std::mem::take(&mut self.online.confirm_quit);
         if let Some(selected) = key.step(selected, items.len()) {
             self.online.confirm_small = false;
             self.screen = Screen::Home { selected };
@@ -587,8 +618,26 @@ impl App {
                 self.choose(item, effects);
             }
             Key::Char('g') if self.games.len() > 1 => self.pick_game(),
-            Key::Esc | Key::Char('q') if !had_notice => effects.push(Effect::Quit),
+            // Esc means back everywhere else: here there's no back, so it
+            // goes to Quit rather than quitting.
+            Key::Esc => {
+                let quit = items.iter().position(|&i| i == HomeItem::Quit);
+                self.screen = Screen::Home {
+                    selected: quit.unwrap_or(selected),
+                };
+            }
+            Key::Char('q') => self.ask_to_quit(quitting, effects),
             _ => {}
+        }
+    }
+
+    /// q quits, the second time it's pressed in a row.
+    fn ask_to_quit(&mut self, asked: bool, effects: &mut Vec<Effect>) {
+        if asked {
+            effects.push(Effect::Quit);
+        } else {
+            self.online.confirm_quit = true;
+            self.online.notice = Some("Press q again to quit.".into());
         }
     }
 
@@ -718,6 +767,13 @@ impl App {
     }
 
     /// A match against bots couldn't start; `why` says so.
+    /// Quick play couldn't queue this player, for `why`.
+    pub fn queue_failed(&mut self, why: String) {
+        if self.screen == Screen::Finding {
+            self.go_home(HomeItem::QuickPlay, Some(why));
+        }
+    }
+
     pub fn bots_failed(&mut self, why: String) {
         if matches!(self.screen, Screen::Finding | Screen::JoiningBots) {
             self.go_home(HomeItem::QuickPlay, Some(why));
@@ -842,10 +898,18 @@ impl App {
             }
             Phase::Results => match key {
                 Key::Enter | Key::Char(' ') if kind == RoomKind::Match => {
+                    // Against bots, bots again; otherwise people.
+                    let bots = self.online.room.as_ref().is_some_and(InRoom::against_bots);
                     effects.push(Effect::LeaveRoom);
                     self.leave_room();
                     let game = self.ui().id();
                     match self.online.pool.filter(|_| self.ui().again_in_same_pool()) {
+                        Some(pool) if bots => {
+                            let i = self.index_of(game).unwrap_or(self.open);
+                            self.online.confirm_small = false;
+                            self.screen = Screen::JoiningBots;
+                            effects.push(self.play_bots(i, pool));
+                        }
                         Some(pool) => self.queue(game, pool, effects),
                         None => self.choose(HomeItem::QuickPlay, effects),
                     }
@@ -898,6 +962,7 @@ impl App {
                     {
                         form.username.push(c);
                     }
+                    FormRow::Current if c.is_ascii_graphic() || c == ' ' => form.current.push(c),
                     FormRow::Password if c.is_ascii_graphic() || c == ' ' => form.password.push(c),
                     FormRow::Repeat if c.is_ascii_graphic() || c == ' ' => form.repeat.push(c),
                     _ => {}
@@ -907,6 +972,7 @@ impl App {
                 FormRow::Username => {
                     form.username.pop();
                 }
+                FormRow::Current => form.current.pop(),
                 FormRow::Password => form.password.pop(),
                 FormRow::Repeat => form.repeat.pop(),
                 FormRow::Remember => {}
@@ -920,27 +986,31 @@ impl App {
     }
 
     fn submit_form(&mut self, kind: FormKind, effects: &mut Vec<Effect>) {
+        let rows = kind.rows(self.online.has_key);
         let form = &mut self.form;
         let needs_name = kind != FormKind::ChangePassword;
         let problem = if needs_name && form.username.is_empty() {
-            Some("Type a username.")
+            Some(("Type a username.", FormRow::Username))
+        } else if kind == FormKind::ChangePassword && form.current.is_empty() {
+            Some(("Type your current password.", FormRow::Current))
         } else if form.password.is_empty() {
-            Some("Type a password.")
+            Some(("Type a password.", FormRow::Password))
         } else if kind != FormKind::SignIn && form.password != form.repeat {
-            Some("The passwords don't match.")
+            Some(("The passwords don't match.", FormRow::Password))
         } else {
             None
         };
-        if let Some(problem) = problem {
+        if let Some((problem, row)) = problem {
             form.error = Some(problem.to_string());
             form.password.clear();
             form.repeat.clear();
-            form.focus = usize::from(needs_name);
+            form.focus = rows.iter().position(|&r| r == row).unwrap_or(0);
             return;
         }
         form.busy = true;
         form.error = None;
         let password = std::mem::take(&mut form.password);
+        let current = std::mem::take(&mut form.current);
         form.repeat.clear();
         effects.push(match kind {
             FormKind::SignUp => Effect::SignUp {
@@ -952,7 +1022,7 @@ impl App {
                 password,
                 remember: form.remember,
             },
-            FormKind::ChangePassword => Effect::ChangePassword(password),
+            FormKind::ChangePassword => Effect::ChangePassword { current, password },
         });
     }
 
@@ -960,14 +1030,28 @@ impl App {
         let online = &mut self.online;
         online.notice = None;
         let rows = online.account_rows();
+        // Any other key, a step included, calls off an x pressed once.
+        let confirm = online.confirm_remove.take();
         if let Some(selected) = key.step(selected, rows.len()) {
             self.screen = Screen::Account { selected };
             return;
         }
         let row = rows[selected.min(rows.len() - 1)];
         match (row, key) {
-            (AccountRow::Key(i), Key::Char('x' | 'd') | Key::Backspace) => {
-                effects.push(Effect::ForgetKey(online.keys[i].fingerprint.clone()));
+            (AccountRow::Key(i), Key::Char('x')) => {
+                let key = online.keys[i].fingerprint.clone();
+                if confirm.as_deref() == Some(&key) {
+                    effects.push(Effect::ForgetKey(key));
+                    online.notice = Some("Forgot that machine.".into());
+                } else {
+                    let which = if online.keys[i].this_machine {
+                        "this machine"
+                    } else {
+                        "that machine"
+                    };
+                    online.notice = Some(format!("Press x again to forget {which}."));
+                    online.confirm_remove = Some(key);
+                }
             }
             (AccountRow::ChangePassword, Key::Enter) => self.start_form(FormKind::ChangePassword),
             (AccountRow::SignOut, Key::Enter) => effects.push(Effect::SignOut),
@@ -1006,6 +1090,7 @@ impl App {
     fn show_leaderboard(&mut self, category: usize, effects: &mut Vec<Effect>) {
         // Fresh every time, so it never shows old places.
         self.online.leaderboard = None;
+        self.online.leaderboard_failed = false;
         self.screen = Screen::Leaderboard { category };
         effects.push(Effect::LoadLeaderboard(self.rating_key(category)));
     }
@@ -1044,11 +1129,18 @@ impl App {
                     accept: true,
                 });
             }
-            (FriendsRow::Request(i), Key::Char('d' | 'x')) => {
-                effects.push(Effect::AnswerFriend {
-                    name: online.friends.incoming[i].clone(),
-                    accept: false,
-                });
+            (FriendsRow::Request(i), Key::Char('x')) => {
+                let name = online.friends.incoming[i].clone();
+                if confirm_remove.as_deref() == Some(&name) {
+                    online.notice = Some(format!("Declined {name}."));
+                    effects.push(Effect::AnswerFriend {
+                        name,
+                        accept: false,
+                    });
+                } else {
+                    online.notice = Some(format!("Press x again to decline {name}."));
+                    online.confirm_remove = Some(name);
+                }
             }
             (FriendsRow::Friend(i), Key::Enter) => {
                 let friend = &online.friends.friends[i];
@@ -1195,8 +1287,7 @@ impl App {
     /// The room changed. Answers what its game does about it.
     pub fn update_room(&mut self, view: Arc<dyn AnyView>) -> Vec<Effect> {
         if let PhaseView::Closed { reason } = &view.shell().phase {
-            self.room_closed(Some(reason.clone()));
-            return Vec::new();
+            return self.room_closed(Some(reason.clone()));
         }
         let Some(room) = self.online.room.as_mut() else {
             return Vec::new();
@@ -1237,13 +1328,33 @@ impl App {
         fx.into_iter().map(|fx| Effect::Game(id, fx)).collect()
     }
 
-    /// The room is gone; `reason` says why, if the room said.
-    pub fn room_closed(&mut self, reason: Option<String>) {
-        if let Some(room) = &self.online.room {
-            let watching = room.watching.is_some();
-            self.leave_room();
-            self.online.notice = reason.or_else(|| watching.then(|| "That game is over.".into()));
+    /// Stops waiting to join, watch or play bots: back to where it began.
+    fn stop_joining(&mut self) {
+        match self.screen {
+            Screen::Joining { by_code: true } => self.go_home(HomeItem::JoinCode, None),
+            Screen::Joining { by_code: false } => self.go_home(HomeItem::CreateRoom, None),
+            Screen::JoiningBots => self.go_home(HomeItem::QuickPlay, None),
+            Screen::JoiningToWatch => self.screen = Screen::Friends { selected: 0 },
+            _ => {}
         }
+    }
+
+    /// The room is gone; `reason` says why, if the room said. Someone
+    /// watching goes back to their friends, as Esc takes them.
+    pub fn room_closed(&mut self, reason: Option<String>) -> Vec<Effect> {
+        let Some(room) = &self.online.room else {
+            return Vec::new();
+        };
+        if room.watching.is_some() {
+            self.online.room = None;
+            self.online.friends_from_room = false;
+            self.screen = Screen::Friends { selected: 0 };
+            self.online.notice = Some(reason.unwrap_or_else(|| "That game is over.".into()));
+            return vec![Effect::LoadFriends];
+        }
+        self.leave_room();
+        self.online.notice = reason;
+        Vec::new()
     }
 
     /// Making or joining a private room, or a match against bots, didn't
@@ -1268,13 +1379,31 @@ impl App {
     }
 
     /// A form was refused; `why` says so, and passwords are cleared.
+    /// The server refused the form: the passwords are typed again, from
+    /// the row at fault, the username's if `why` is about it.
     pub fn form_failed(&mut self, why: String) {
+        let rows = match self.screen {
+            Screen::Form(kind) => kind.rows(self.online.has_key),
+            _ => Vec::new(),
+        };
+        let at_fault = if why.contains("sername") {
+            FormRow::Username
+        } else if rows.contains(&FormRow::Current) && why.contains("current") {
+            FormRow::Current
+        } else {
+            FormRow::Password
+        };
         let form = &mut self.form;
         form.busy = false;
         form.error = Some(why);
+        // The current password stays unless it was wrong, so the focus
+        // lands on the first row to type again.
+        if at_fault == FormRow::Current {
+            form.current.clear();
+        }
         form.password.clear();
         form.repeat.clear();
-        form.focus = 0;
+        form.focus = rows.iter().position(|&r| r == at_fault).unwrap_or(0);
     }
 
     /// The new account is ready; the guest's settings and records came
@@ -1311,7 +1440,7 @@ impl App {
     pub fn password_changed(&mut self) {
         self.form = Form::default();
         self.screen = Screen::Account { selected: 0 };
-        self.notify("Password changed.".to_string());
+        self.notify("Password changed. Other machines will need it to sign in.".to_string());
     }
 
     pub fn set_keys(&mut self, keys: Vec<KeyRow>) {
@@ -1345,6 +1474,11 @@ impl App {
             return;
         }
         self.online.leaderboard = Some(view);
+    }
+
+    /// The leaderboard asked for last couldn't load.
+    pub fn leaderboard_failed(&mut self) {
+        self.online.leaderboard_failed = true;
     }
 
     /// `from` invites this player to their room, of `game`.

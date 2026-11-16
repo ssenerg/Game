@@ -31,7 +31,7 @@ pub fn draw(frame: &mut Frame, app: &SnakeUi, ctx: &Ctx, selected: usize) {
     let rect = centered_rect(body_area, 58, rows as u16 + 2);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::DarkGray))
+        .border_style(shell_tui::ui::dim())
         .title(" Room rules ")
         .title_style(
             Style::default()
@@ -49,7 +49,7 @@ pub fn draw(frame: &mut Frame, app: &SnakeUi, ctx: &Ctx, selected: usize) {
     let selected = items[selected.min(items.len() - 1)];
     draw_settings(frame, inner, &cfg, &items, selected, hosting);
 
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = shell_tui::ui::dim();
     let status = match (ctx.notice, hosting) {
         (Some(notice), _) => Line::styled(
             notice.to_string(),

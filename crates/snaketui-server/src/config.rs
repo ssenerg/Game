@@ -25,6 +25,9 @@ pub struct ServerConfig {
     pub database: String,
     /// Threads serving sessions; 0 means one per CPU core.
     pub workers: usize,
+    /// Threads running rooms, the lobby and the matchmaker; 0 means one for
+    /// every two CPU cores, and at least two.
+    pub room_threads: usize,
     /// Load balancers that put a PROXY header (version 1 or 2) before each
     /// connection, saying who the player really is: addresses, or networks
     /// such as "10.0.0.0/8". Connections from them must have one; others
@@ -63,6 +66,7 @@ impl Default for ServerConfig {
             host_key: "/var/lib/snaketui/host_ed25519_key".into(),
             database: "sqlite:///var/lib/snaketui/snaketui.db".into(),
             workers: 0,
+            room_threads: 0,
             trusted_proxies: Vec::new(),
             max_sessions: 2000,
             max_sessions_per_ip: 10,
@@ -117,6 +121,18 @@ impl ServerConfig {
     /// Settings that parse but can't work together.
     pub fn check(&self) -> Result<()> {
         crate::proxy::Trusted::parse(&self.trusted_proxies).context("in trusted_proxies")?;
+        // 0 would start a server that admits or keeps nobody.
+        for (name, value) in [
+            ("max_sessions", self.max_sessions as u64),
+            ("max_sessions_per_ip", self.max_sessions_per_ip as u64),
+            ("login_timeout_secs", self.login_timeout_secs),
+            ("idle_timeout_secs", self.idle_timeout_secs),
+            ("stall_timeout_secs", self.stall_timeout_secs),
+        ] {
+            if value == 0 {
+                bail!("{name} must be at least 1");
+            }
+        }
         for name in &self.enabled_games {
             let known = GameId::from_name(name).and_then(crate::games::get);
             if known.is_none() {
@@ -163,6 +179,14 @@ impl ServerConfig {
             self.workers
         } else {
             std::thread::available_parallelism().map_or(2, |n| n.get())
+        }
+    }
+
+    pub fn room_threads(&self) -> usize {
+        if self.room_threads > 0 {
+            self.room_threads
+        } else {
+            (std::thread::available_parallelism().map_or(2, |n| n.get()) / 2).max(2)
         }
     }
 
@@ -216,6 +240,22 @@ mod tests {
         assert_eq!(both.games(), [GameId::Snake, GameId::Chess]);
         assert!(cfg("enabled_games = [\"checkers\"]").check().is_err());
         assert!(cfg("enabled_games = []").check().is_err());
+    }
+
+    #[test]
+    fn limits_and_timeouts_are_never_zero() {
+        let cfg = |text: &str| toml::from_str::<ServerConfig>(text).unwrap().check();
+        assert!(cfg("").is_ok());
+        for zero in [
+            "max_sessions = 0",
+            "max_sessions_per_ip = 0",
+            "login_timeout_secs = 0",
+            "idle_timeout_secs = 0",
+            "stall_timeout_secs = 0",
+        ] {
+            assert!(cfg(zero).is_err(), "{zero}");
+        }
+        assert!(cfg("drain_timeout_secs = 0").is_ok(), "0 logs out at once");
     }
 
     #[test]

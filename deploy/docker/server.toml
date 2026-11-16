@@ -2,7 +2,9 @@
 # ../server.toml.example). To change them, mount your own file at
 # /etc/snaketui/server.toml.
 
-# docker-compose.yml publishes these on the host.
+# docker-compose.yml publishes these on the host. The admin port has no
+# password: publish it on the host's loopback only (127.0.0.1:9022:9022),
+# never to the internet.
 listen = "0.0.0.0:2222"
 admin_listen = "0.0.0.0:9022"
 

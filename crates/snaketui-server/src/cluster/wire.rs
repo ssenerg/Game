@@ -258,4 +258,37 @@ mod tests {
         assert_eq!(decode::<Alive>(&[]), None);
         assert_eq!(decode::<JoinRequest>(&[VERSION, 0xff]), None);
     }
+
+    /// The games' settings cross the wire inside rooms' views and their
+    /// commands, in postcard, which says nothing of their shape: a field
+    /// added anywhere shifts every one after it. So their bytes are kept
+    /// here, as of [`VERSION`] [`SHAPES_AT`]; a change to them needs a new
+    /// version.
+    const SHAPES_AT: u8 = 16;
+    const SHAPES: [(&str, &str); 2] = [
+        (
+            "snake rules",
+            "1e1496010000030f14080f0c0000030500000a08050300030f0802030308",
+        ),
+        ("chess settings", "d8040000000003"),
+    ];
+
+    #[test]
+    fn the_games_settings_change_shape_only_with_the_version() {
+        let hex = |bytes: Vec<u8>| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let now = [
+            hex(postcard::to_allocvec(&snake_core::config::Rules::default()).unwrap()),
+            hex(postcard::to_allocvec(&chess_core::round::ChessSettings::default()).unwrap()),
+        ];
+        assert_eq!(
+            VERSION, SHAPES_AT,
+            "a new version: set SHAPES_AT to it, and SHAPES to {now:?}"
+        );
+        for ((what, kept), now) in SHAPES.iter().zip(&now) {
+            assert_eq!(
+                kept, now,
+                "the {what} changed shape: bump VERSION, then set SHAPES_AT and SHAPES"
+            );
+        }
+    }
 }

@@ -16,9 +16,15 @@ pub fn draw(frame: &mut Frame, app: &App, category: usize) {
     let label = categories[category.min(categories.len() - 1)].label;
     let [body_area, footer_area] =
         Layout::vertical([Constraint::Min(3), Constraint::Length(2)]).areas(frame.area());
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = super::dim();
 
     let lines = match &online.leaderboard {
+        None if online.leaderboard_failed => vec![
+            Line::default(),
+            Line::from("Couldn't load the leaderboard.").centered(),
+            Line::styled("Esc, then try again in a moment.", dim).centered(),
+            Line::default(),
+        ],
         None => vec![
             Line::default(),
             Line::styled("Loading…", dim).centered(),

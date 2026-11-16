@@ -71,6 +71,36 @@ fn seed_where(players: u64, rules: &Rules, wanted: impl Fn(Option<&Entrant>, u64
 }
 
 #[tokio::test]
+async fn quick_play_refused_for_going_too_fast_goes_back_home() {
+    let server = TestServer::start();
+    let mut ann = guest(server.addr, "ann", 100, 30).await;
+    pick(&ann, 1).await;
+    // In and out of the queue, faster than quick play allows for long.
+    let mut refused = false;
+    for _ in 0..60 {
+        ann.wait_for("QUICK PLAY").await;
+        ann.send(ENTER).await;
+        ann.wait_until("queued or refused", Duration::from_secs(3), |p| {
+            p.text().contains("Finding a match") || p.text().contains("Slow down")
+        })
+        .await;
+        if ann.text().contains("Slow down") {
+            refused = true;
+            break;
+        }
+        ann.send(ESC).await;
+        ann.wait_until("home", Duration::from_secs(3), |p| {
+            !p.text().contains("Finding a match")
+        })
+        .await;
+        ann.send(ENTER).await;
+    }
+    assert!(refused, "{}", ann.text());
+    assert!(!ann.text().contains("Finding a match"), "{}", ann.text());
+    assert!(ann.text().contains("Quick play"), "home:\n{}", ann.text());
+}
+
+#[tokio::test]
 async fn two_players_are_matched_and_see_the_countdown_and_each_other() {
     let server = TestServer::start();
     let mut ann = guest(server.addr, "ann", 80, 24).await;
@@ -143,7 +173,7 @@ async fn leaving_and_dropping_out_mid_round_leave_the_others_playing() {
 
     // Esc asks first; y leaves while the round goes on for the others.
     ann.send(ESC).await;
-    ann.wait_for("Leave the match?").await;
+    ann.wait_for("Leave the round?").await;
     ann.send(b"y").await;
     ann.wait_for("Quick play").await;
     ben.wait_until("ann's snake gone", Duration::from_secs(3), |p| {
@@ -229,9 +259,10 @@ async fn small_terminals_are_warned_and_see_part_of_the_board() {
     for p in [&ann, &ben] {
         p.send(ENTER).await;
     }
-    ben.wait_for("showing part of the board").await;
+    // A 50-column terminal has room for the short warning on the frame.
+    ben.wait_for("part shown · needs 80×23").await;
     ann.wait_for("GET READY").await;
-    assert!(!ann.text().contains("showing part"));
+    assert!(!ann.text().contains("part shown"));
 }
 
 #[tokio::test]

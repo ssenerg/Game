@@ -4,9 +4,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Paragraph};
 use snake_core::config::GameConfig;
-use snake_core::settings::{Kind, SETTINGS};
+use snake_core::settings::{Kind, SETTINGS, Section};
 
-use shell_tui::ui::centered_rect;
+use shell_tui::ui::{centered_rect, dim};
 
 use crate::app::SnakeUi;
 use crate::palette::theme_color;
@@ -65,7 +65,7 @@ pub fn draw(frame: &mut Frame, app: &SnakeUi, online: bool) {
     let rect = centered_rect(list_area, 58.min(list_area.width), list_area.height);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::DarkGray))
+        .border_style(dim())
         .title(" Settings ")
         .title_style(
             Style::default()
@@ -92,7 +92,7 @@ pub fn draw(frame: &mut Frame, app: &SnakeUi, online: bool) {
         Line::from(format!(
             "↑↓ select · ←→ adjust · Enter play · r reset · q {back}"
         ))
-        .style(Style::default().fg(Color::DarkGray))
+        .style(dim())
     };
     let footer = vec![
         Line::from(format!("★ best for this setup: {record}"))
@@ -133,7 +133,7 @@ pub(super) fn draw_settings(
         lines.push(match row {
             Row::Blank => Line::default(),
             Row::Header(title) => Line::from(vec![
-                Span::styled(" ── ", Style::default().fg(Color::DarkGray)),
+                Span::styled(" ── ", dim()),
                 Span::styled(
                     (*title).to_string(),
                     Style::default()
@@ -145,15 +145,34 @@ pub(super) fn draw_settings(
                         " {}",
                         "─".repeat((inner.width as usize).saturating_sub(title.len() + 6))
                     ),
-                    Style::default().fg(Color::DarkGray),
+                    dim(),
                 ),
             ]),
             &Row::Item(i) => {
                 let active = i == selected;
+                let setting = &SETTINGS[i];
+                // With bots, every snake moves on the tick and super food
+                // gives no boost: what's played instead follows the value.
+                let played = (cfg.rules.bots > 0
+                    && matches!(setting.key, "move_timing" | "boost_duration_s"))
+                .then(|| {
+                    GameConfig {
+                        rules: cfg.rules.clone().for_solo(),
+                        theme: cfg.theme.clone(),
+                    }
+                    .value_str(i)
+                });
+                // The guns' own settings matter only with guns on.
+                let idle = played.is_some()
+                    || (setting.section == Section::Guns
+                        && setting.key != "guns"
+                        && !cfg.rules.guns);
                 let label_style = if active {
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD)
+                } else if idle {
+                    dim()
                 } else {
                     Style::default()
                 };
@@ -182,10 +201,15 @@ pub(super) fn draw_settings(
                 if active && editable {
                     spans.push(Span::styled(format!("◂ {value} ▸"), label_style));
                 } else {
-                    spans.push(Span::styled(
-                        format!("  {value}"),
-                        Style::default().fg(Color::Gray),
-                    ));
+                    let style = if idle {
+                        dim()
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    };
+                    spans.push(Span::styled(format!("  {value}"), style));
+                }
+                if let Some(played) = played {
+                    spans.push(Span::styled(format!(" (bots: {played})"), dim()));
                 }
                 Line::from(spans)
             }

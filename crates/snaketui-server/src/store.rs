@@ -15,7 +15,9 @@
 
 use std::collections::HashSet;
 use std::str::FromStr;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, bail};
 use game_api::{GameId, Records};
@@ -227,7 +229,20 @@ const MIGRATIONS: &[Migration] = &[
         postgres: POSTGRES_DROP_OLD,
         breaks_older: true,
     },
+    Migration {
+        name: "index keys by account and guests by last visit",
+        sqlite: INDEXES,
+        postgres: INDEXES,
+        breaks_older: false,
+    },
 ];
+
+/// Step 5: SQLite's remembered keys get the index by account Postgres's
+/// had from the start, and guests one by their last visit, for tidying.
+const INDEXES: &str = "
+CREATE INDEX IF NOT EXISTS account_keys_account ON account_keys (account_id);
+CREATE INDEX IF NOT EXISTS players_last_seen ON players (last_seen);
+";
 
 /// Step 2: ratings and settings are kept for each game, apart, starting
 /// with copies of Snake's. Until every server writes them, the accounts'
@@ -495,6 +510,9 @@ pub const MAX_KEYS: i64 = 10;
 pub const MAX_FRIENDS: i64 = 200;
 /// Friend requests waiting for an answer, from one account.
 pub const MAX_PENDING: i64 = 20;
+/// Requests one account may have waiting for it, so nobody's list can be
+/// flooded.
+pub const MAX_INCOMING: i64 = 50;
 
 pub type AccountId = i64;
 
@@ -509,6 +527,14 @@ macro_rules! account_columns {
 #[derive(Clone)]
 pub struct Store {
     pool: AnyPool,
+    writes: Arc<Writes>,
+}
+
+/// Writes running in the background, which a stopping server waits for.
+#[derive(Default)]
+struct Writes {
+    running: AtomicUsize,
+    done: tokio::sync::Notify,
 }
 
 /// What's saved for a returning guest with a key.
@@ -610,6 +636,8 @@ pub enum Requested {
     AlreadyFriends,
     AlreadyAsked,
     TooMany,
+    /// They have as many requests waiting as they may.
+    TheirsFull,
 }
 
 /// One account's result in a rated round.
@@ -722,7 +750,40 @@ impl Store {
             Some("postgres" | "postgresql") => open_postgres(url).await?,
             _ => bail!("the database must be a sqlite: or postgres: URL"),
         };
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            writes: Arc::default(),
+        })
+    }
+
+    /// Runs `write` in the background, on this thread's arbiter. A stopping
+    /// server waits for it: see [`Self::writes_done`].
+    pub fn spawn_write(&self, write: impl Future<Output = ()> + 'static) {
+        let writes = Arc::clone(&self.writes);
+        writes.running.fetch_add(1, Ordering::SeqCst);
+        actix::spawn(async move {
+            write.await;
+            if writes.running.fetch_sub(1, Ordering::SeqCst) == 1 {
+                writes.done.notify_waiters();
+            }
+        });
+    }
+
+    /// Waits, up to `limit`, for the writes [`Self::spawn_write`] started.
+    /// Returns whether they all finished.
+    pub async fn writes_done(&self, limit: Duration) -> bool {
+        let all = async {
+            loop {
+                let done = self.writes.done.notified();
+                tokio::pin!(done);
+                done.as_mut().enable();
+                if self.writes.running.load(Ordering::SeqCst) == 0 {
+                    return;
+                }
+                done.await;
+            }
+        };
+        tokio::time::timeout(limit, all).await.is_ok()
     }
 
     /// Waits for writes in progress, then closes the database.
@@ -987,6 +1048,17 @@ impl Store {
         Ok(())
     }
 
+    /// Forgets every key the account is remembered by but `keep`.
+    pub async fn forget_keys_but(&self, id: AccountId, keep: Option<&str>) -> Result<()> {
+        sqlx::query("DELETE FROM account_keys WHERE account_id = $1 AND fingerprint <> $2")
+            .bind(id)
+            // No key's fingerprint is empty.
+            .bind(keep.unwrap_or(""))
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Forgets `key` if it belongs to this account; returns whether it did.
     pub async fn forget_key(&self, id: AccountId, key: &str) -> Result<bool> {
         let done =
@@ -1074,8 +1146,8 @@ impl Store {
     /// ratings from the ones saved now, saves them, and answers each
     /// account's rating before and after, in the same order. Rounds ending
     /// at once, with the same account in both, take turns, so neither
-    /// overwrites the other. A game rated by Glicko-2 is between two:
-    /// equal places are a draw.
+    /// overwrites the other. Those sharing first place drew. A game rated
+    /// by Glicko-2 is between two: equal places are a draw.
     pub async fn rate_round(
         &self,
         key: RatingKey,
@@ -1105,9 +1177,11 @@ impl Store {
             before.push(standing(&mut tx, id, key).await?);
         }
         let after = after_round(&before, players, now());
-        let drawn = players.iter().all(|p| p.1 == players[0].1);
-        for (&(id, _, won), &rating) in players.iter().zip(&after) {
-            save_standing(&mut tx, id, key, rating, (won, drawn && !won)).await?;
+        let first = players.iter().map(|p| p.1).min().unwrap_or(1);
+        let tied_first = players.iter().filter(|p| p.1 == first).count() > 1;
+        for (&(id, place, won), &rating) in players.iter().zip(&after) {
+            let drew = tied_first && place == first && !won;
+            save_standing(&mut tx, id, key, rating, (won, drew)).await?;
         }
         tx.commit().await?;
         Ok(before.into_iter().map(|s| s.rating).zip(after).collect())
@@ -1248,6 +1322,14 @@ impl Store {
             .try_get(0)?;
         if pending >= MAX_PENDING || friend_count(&mut tx, from).await? >= MAX_FRIENDS {
             return Ok(Requested::TooMany);
+        }
+        let incoming: i64 = sqlx::query("SELECT COUNT(*) FROM friend_requests WHERE to_id = $1")
+            .bind(to)
+            .fetch_one(&mut *tx)
+            .await?
+            .try_get(0)?;
+        if incoming >= MAX_INCOMING {
+            return Ok(Requested::TheirsFull);
         }
         sqlx::query("INSERT INTO friend_requests (from_id, to_id, created_at) VALUES ($1, $2, $3)")
             .bind(from)
@@ -1407,6 +1489,31 @@ impl Store {
     }
 
     /// Drops events from before `before`, and locks that ran out by `now`.
+    /// Forgets guests not seen since `quiet_since` who saved nothing but a
+    /// visit, and every guest not seen since `gone_since`, with what they
+    /// saved.
+    pub async fn tidy_guests(&self, quiet_since: i64, gone_since: i64) -> Result<()> {
+        sqlx::query(
+            "DELETE FROM players WHERE last_seen < $1
+               OR (last_seen < $2
+                   AND NOT EXISTS (SELECT 1 FROM player_prefs p
+                                   WHERE p.fingerprint = players.fingerprint)
+                   AND NOT EXISTS (SELECT 1 FROM solo_records r
+                                   WHERE r.fingerprint = players.fingerprint))",
+        )
+        .bind(gone_since)
+        .bind(quiet_since)
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "DELETE FROM solo_records WHERE NOT EXISTS
+               (SELECT 1 FROM players p WHERE p.fingerprint = solo_records.fingerprint)",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn tidy_limits(&self, before: i64, now: i64) -> Result<()> {
         sqlx::query("DELETE FROM limit_events WHERE at <= $1")
             .bind(before)
@@ -1676,6 +1783,69 @@ mod tests {
 
     async fn sqlite() -> Store {
         Store::open("sqlite::memory:").await.unwrap()
+    }
+
+    #[actix_rt::test]
+    async fn old_guests_who_saved_nothing_are_forgotten() {
+        let store = sqlite().await;
+        for fp in ["SHA256:quiet", "SHA256:kept", "SHA256:gone", "SHA256:new"] {
+            store.visit(fp, "~guest").await.unwrap();
+        }
+        for fp in ["SHA256:kept", "SHA256:gone"] {
+            store
+                .save_prefs(fp, GameId::Snake, "tick_ms=100\n")
+                .await
+                .unwrap();
+        }
+        store.save_record("SHA256:gone", "key", 5).await.unwrap();
+        let ago = |days: i64| now() - days * 24 * 60 * 60;
+        for (fp, at) in [
+            ("SHA256:quiet", ago(40)),
+            ("SHA256:kept", ago(40)),
+            ("SHA256:gone", ago(400)),
+        ] {
+            sqlx::query("UPDATE players SET last_seen = $1 WHERE fingerprint = $2")
+                .bind(at)
+                .bind(fp)
+                .execute(&store.pool)
+                .await
+                .unwrap();
+        }
+        store.tidy_guests(ago(30), ago(365)).await.unwrap();
+        let left: Vec<String> = sqlx::query("SELECT fingerprint FROM players ORDER BY fingerprint")
+            .fetch_all(&store.pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        assert_eq!(left, ["SHA256:kept", "SHA256:new"]);
+        let records: i64 = sqlx::query("SELECT COUNT(*) FROM solo_records")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(records, 0, "the gone guest's record went too");
+    }
+
+    #[actix_rt::test]
+    async fn stopping_waits_for_writes_in_the_background() {
+        let store = sqlite().await;
+        let saved = Arc::new(AtomicUsize::new(0));
+        for ms in [20, 60] {
+            let saved = Arc::clone(&saved);
+            store.spawn_write(async move {
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+                saved.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+        assert!(store.writes_done(Duration::from_secs(5)).await);
+        assert_eq!(saved.load(Ordering::SeqCst), 2, "both finished");
+        store.spawn_write(tokio::time::sleep(Duration::from_secs(60)));
+        assert!(
+            !store.writes_done(Duration::from_millis(50)).await,
+            "only so long"
+        );
     }
 
     async fn postgres() -> Store {
@@ -2245,6 +2415,26 @@ mod tests {
             let standing = quick(&store, id).await;
             assert_eq!((standing.games, standing.wins), (1, wins));
         }
+        // Two of three share first place: they drew; the third didn't.
+        let cat = account(&store, "cat", None).await;
+        store
+            .rate_round(
+                SNAKE_QUICK,
+                &[(ann.id, 1, false), (ben.id, 1, false), (cat.id, 3, false)],
+            )
+            .await
+            .unwrap();
+        for (id, drew) in [(ann.id, 1), (ben.id, 1), (cat.id, 0)] {
+            let draws: i64 =
+                sqlx::query("SELECT draws FROM ratings WHERE account_id = $1 AND category = $2")
+                    .bind(id)
+                    .bind(SNAKE_QUICK.category)
+                    .fetch_one(&store.pool)
+                    .await
+                    .unwrap()
+                    .get(0);
+            assert_eq!(draws, drew);
+        }
     }
 
     async fn each_rating_is_ranked_apart(store: Store) {
@@ -2595,6 +2785,20 @@ mod tests {
         assert_eq!(
             store.request_friend(a.id, one_more.id).await.unwrap(),
             Requested::TooMany
+        );
+        // And so are those waiting for one account.
+        let popular = account(&store, "popular", None).await;
+        for i in 0..MAX_INCOMING {
+            let fan = account(&store, &format!("fan{i}"), None).await;
+            assert_eq!(
+                store.request_friend(fan.id, popular.id).await.unwrap(),
+                Requested::Sent
+            );
+        }
+        let fan = account(&store, "fan-late", None).await;
+        assert_eq!(
+            store.request_friend(fan.id, popular.id).await.unwrap(),
+            Requested::TheirsFull
         );
     }
 

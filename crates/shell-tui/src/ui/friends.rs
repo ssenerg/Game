@@ -25,16 +25,18 @@ pub fn draw(frame: &mut Frame, app: &App, selected: usize) {
     let rect = centered_rect(body_area, 64, height);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::DarkGray))
+        .border_style(super::dim())
         .title(" Friends ")
         .title_alignment(Alignment::Center);
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = super::dim();
     let heading = |text: &'static str| Line::styled(format!("  {text}"), dim);
     let mut lines = vec![Line::default()];
     let mut last = None;
+    // The selected row's line, which scrolling keeps in view.
+    let mut shown = 0;
     for (i, row) in rows.iter().enumerate() {
         let active = i == selected;
         let style = if active {
@@ -64,11 +66,14 @@ pub fn draw(frame: &mut Frame, app: &App, selected: usize) {
             }
             last = Some(kind);
         }
+        if active {
+            shown = lines.len();
+        }
         lines.push(match row {
             FriendsRow::Add => Line::styled(format!("{marker}Add a friend"), style),
             FriendsRow::Request(r) => Line::from(vec![
                 Span::styled(format!("{marker}{:<16}", view.incoming[*r]), style),
-                Span::styled("  a accept · d decline", dim),
+                Span::styled("  a accept · x decline", dim),
             ]),
             FriendsRow::Friend(f) => {
                 let friend = &view.friends[*f];
@@ -92,7 +97,9 @@ pub fn draw(frame: &mut Frame, app: &App, selected: usize) {
             ]),
         });
     }
-    frame.render_widget(Paragraph::new(lines), inner);
+    let fits = usize::from(inner.height).max(1);
+    let scroll = (shown + 1).saturating_sub(fits) as u16;
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
 
     let status = match &online.notice {
         Some(notice) => Line::styled(

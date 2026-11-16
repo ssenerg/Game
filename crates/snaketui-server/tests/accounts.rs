@@ -92,6 +92,42 @@ async fn signing_out_forgets_the_key() {
 }
 
 #[tokio::test]
+async fn changing_the_password_takes_the_old_one_and_forgets_other_machines() {
+    let server = TestServer::start();
+    let (first, first_key) = signed_up(server.addr, "ann").await;
+    drop(first);
+    let this = new_key();
+    let mut p = connect_as(server.addr, Login::Key(&this)).await;
+    try_sign_in(&mut p, "ann", PASSWORD, true).await;
+    p.wait_for("Signed in as ann").await;
+    pick(&p, QUICK_PLAY, ACCOUNT).await;
+    p.wait_for("SHA256:").await;
+    // Past the two machines, to Change password.
+    down_enter(&p, 2).await;
+    p.wait_for("Current password").await;
+    const NEW: &str = "battery staple 9";
+    for line in ["not the password", NEW, NEW] {
+        p.send(line.as_bytes()).await;
+        p.send(ENTER).await;
+    }
+    p.wait_for("That's not your current password.").await;
+    for line in [PASSWORD, NEW, NEW] {
+        p.send(line.as_bytes()).await;
+        p.send(ENTER).await;
+    }
+    p.wait_for("Password changed.").await;
+    drop(p);
+
+    let old = connect_as(server.addr, Login::Key(&first_key)).await;
+    assert!(old.text().contains("(guest)"), "{}", old.text());
+    let here = connect_as(server.addr, Login::Key(&this)).await;
+    assert!(here.text().contains("Signed in as ann"), "{}", here.text());
+    let mut fresh = connect_as(server.addr, Login::Guest).await;
+    try_sign_in(&mut fresh, "ann", NEW, false).await;
+    fresh.wait_for("Signed in as ann").await;
+}
+
+#[tokio::test]
 async fn a_guests_settings_and_records_move_into_a_new_account() {
     let server = TestServer::start();
     let key = new_key();

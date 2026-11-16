@@ -82,6 +82,7 @@ async fn passwords_never_reach_the_logs() {
     p.send(DOWN).await; // past ann's key
     p.send(ENTER).await;
     p.wait_for("Change password").await;
+    type_line(&p, FIRST).await;
     type_line(&p, SECOND).await;
     type_line(&p, SECOND).await;
     p.wait_for("Password changed.").await;

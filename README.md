@@ -3,6 +3,9 @@
 A highly configurable snake game for your terminal, built in Rust with
 [ratatui](https://ratatui.rs).
 
+**Play now:** `ssh game.ssenerg.com`. Nothing to install, and no account
+needed: you play as a guest until you sign up.
+
 ## Features
 
 - **Two move timings**
@@ -440,6 +443,24 @@ you make the window bigger again and resume.
 | `Ctrl+C` | Quit right away, from any screen |
 
 Letter keys work the same with Shift or Caps Lock on.
+
+Online, in rooms and around them:
+
+| Key | Where | Action |
+| --- | --- | --- |
+| `Enter` | Lobby | Ready, or not ready again |
+| `e` | Lobby | Snake: the room's rules, which the host changes. Chess: the challenge |
+| `← →` | Lobby, as host | Snake: the speed. Chess: the time control |
+| `b` / `x` | Lobby, as host | Add a bot, or the computer in chess / take one out |
+| `i` | Lobby, signed in | Invite friends |
+| `Esc` | Lobby or round | Leave the room (in a round, it asks first) |
+| `Enter` | Results | Play again: the same pool, or the same bots |
+| `b` | Waiting in quick play | After 20 seconds, play bots, or the computer in chess |
+| `v` | Friends | Watch a friend who's playing |
+| `a` / `x` `x` | Friends | Accept a request / decline it, or remove a friend (press `x` twice) |
+| `x` `x` | Account | Forget a remembered machine (press `x` twice) |
+| `Esc` | A chess game | The game menu: offer a draw, resign, abort, flip the board |
+| `f` | Watching chess | Flip the board |
 
 Holding `f` to throw needs a terminal that says when a key is let go, by the
 kitty keyboard protocol, such as kitty, WezTerm, Ghostty, foot or Alacritty.

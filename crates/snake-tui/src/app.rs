@@ -27,7 +27,7 @@ use crate::ui;
 /// what it is.
 pub const QUICK_POOLS: [(&str, &str, &str); 2] = [
     (QUICK_POOL, "Classic", "every snake for itself"),
-    (GUNS_POOL, "Guns", "lasers and pistols on the board"),
+    (GUNS_POOL, "Guns", "guns, grenades, flashbangs, smoke"),
 ];
 
 /// The prefs line that keeps the quick-play pool last picked, after the

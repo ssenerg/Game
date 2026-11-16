@@ -58,6 +58,10 @@ const QUEUE_WAKE: Duration = Duration::from_secs(1);
 /// How soon to retry drawing for a client that's behind.
 const RETRY_DRAW: Duration = Duration::from_millis(10);
 const IDLE_CHECK: Duration = Duration::from_secs(15);
+/// How long before an idle logout the player is warned.
+const IDLE_WARNING: Duration = Duration::from_secs(60);
+/// Waiting in the quick-play queue isn't idling, up to this long.
+const QUEUE_IDLE: Duration = Duration::from_secs(30 * 60);
 /// How often the terminal is asked for a status report, to time the round
 /// trip.
 const PING_EVERY: Duration = Duration::from_secs(2);
@@ -105,6 +109,13 @@ const PROBE_WAIT: Duration = Duration::from_secs(2);
 /// matters, since terminals fit pictures to the cells.
 const CELL_PIXELS: (u16, u16) = (8, 16);
 
+/// `cell`, if it's a size a terminal's cell could be, in pixels: one the
+/// client says otherwise would only make the server draw huge pictures.
+fn sane_cell(cell: (u16, u16)) -> Option<(u16, u16)> {
+    let (w, h) = cell;
+    ((4..=64).contains(&w) && (8..=128).contains(&h) && h >= w && h <= 4 * w).then_some(cell)
+}
+
 /// What a terminal has said of itself, while it's being asked.
 #[derive(Default)]
 struct Probe {
@@ -120,6 +131,7 @@ pub const NEEDS_PTY: &str =
 pub const NO_COMMANDS: &str =
     "This server only runs SnakeTUI and can't run commands. Connect with: ssh <host>\r\n";
 const SHUTTING_DOWN: &str = "The SnakeTUI server is restarting. Please reconnect in a minute.\r\n";
+const BROKE: &str = "Something broke on the server, sorry. Please reconnect.\r\n";
 
 /// Frames held back for a client that's behind.
 struct Hold {
@@ -151,8 +163,11 @@ impl Hold {
 /// What the writer task sends down the channel, in order.
 enum Out {
     Data(Bytes),
-    /// Report the exit status, close the channel, and drop the connection.
+    /// Send `last`, report the exit status, close the channel, and drop
+    /// the connection. One message, so the terminal is put back as it was
+    /// however full the queue is with frames.
     Close {
+        last: Bytes,
         exit_status: u32,
     },
 }
@@ -220,7 +235,10 @@ pub struct Input(pub Bytes);
 
 #[derive(Message)]
 #[rtype(result = "()")]
-pub struct Resized {
+pub struct Resized(pub Arc<std::sync::Mutex<Option<WindowSize>>>);
+
+/// A window's size, as the client says it.
+pub struct WindowSize {
     pub cols: u32,
     pub rows: u32,
     /// The window in pixels, width then height, if the client said.
@@ -231,15 +249,20 @@ pub struct Resized {
 #[rtype(result = "()")]
 pub struct Disconnected;
 
-/// Whether `effect` reaches the database or the lobby, and so spends one
-/// of the player's actions.
+/// Whether `effect` reaches the database, the lobby or the queue, and so
+/// spends one of the player's actions. Loads are coalesced instead: see
+/// [`Load`]. Leaving the queue is never refused: the app has already left,
+/// and a ticket left behind would be matched with nobody there.
 fn costly(effect: &Effect) -> bool {
     matches!(
         effect,
-        Effect::SignUp { .. }
+        Effect::QuickPlay { .. }
+            | Effect::AddBot
+            | Effect::RemoveBot
+            | Effect::SignUp { .. }
             | Effect::SignIn { .. }
             | Effect::SignOut
-            | Effect::ChangePassword(_)
+            | Effect::ChangePassword { .. }
             | Effect::ForgetKey(_)
             | Effect::AddFriend(_)
             | Effect::AnswerFriend { .. }
@@ -395,6 +418,8 @@ pub struct SessionActor {
     redraw: Option<SpawnHandle>,
     last_tick: Instant,
     last_input: Instant,
+    /// The player was told they'll be logged out for idling.
+    warned_idle: bool,
     /// The round trip to the player's terminal, smoothed.
     ping: Option<Duration>,
     /// When the status query waiting for an answer went out.
@@ -496,6 +521,7 @@ impl SessionActor {
             redraw: None,
             last_tick: now,
             last_input: now,
+            warned_idle: false,
             ping: None,
             ping_sent: None,
             ping_misses: 0,
@@ -711,10 +737,10 @@ impl SessionActor {
         let said = (self.pixels.0 / cols.max(1), self.pixels.1 / rows.max(1));
         let cell = probe
             .cell
-            .filter(|&(w, h)| w > 0 && h > 0)
+            .and_then(sane_cell)
             .or_else(|| {
-                let fits = |n: u32| u16::try_from(n).ok().filter(|&n| n > 0);
-                Some((fits(said.0)?, fits(said.1)?))
+                let fits = |n: u32| u16::try_from(n).ok();
+                sane_cell((fits(said.0)?, fits(said.1)?))
             })
             .unwrap_or(CELL_PIXELS);
         debug!(peer = %self.peer, ?protocol, ?cell, "showing pictures");
@@ -767,13 +793,18 @@ impl SessionActor {
         let Some(app) = self.app.as_mut() else { return };
         let was_playing = app.playing_alone() || app.screen == Screen::Finding;
         let mut effects = Vec::new();
-        for key in keys {
-            let fx = app.handle(key);
-            let quit = fx.contains(&Effect::Quit);
-            effects.extend(fx);
-            if quit {
-                break;
+        let handled = catch_unwind(AssertUnwindSafe(|| {
+            for key in keys {
+                let fx = app.handle(key);
+                let quit = fx.contains(&Effect::Quit);
+                effects.extend(fx);
+                if quit {
+                    break;
+                }
             }
+        }));
+        if handled.is_err() {
+            return self.broke("a key", ctx);
         }
         if !was_playing {
             // Time spent in menus or paused doesn't count toward the game.
@@ -825,7 +856,9 @@ impl SessionActor {
                     remember,
                 } => self.sign_in(username, password, remember, ctx),
                 Effect::SignOut => self.sign_out(ctx),
-                Effect::ChangePassword(password) => self.change_password(password, ctx),
+                Effect::ChangePassword { current, password } => {
+                    self.change_password(current, password, ctx);
+                }
                 Effect::ForgetKey(key) => self.refresh_keys(Some(key), ctx),
                 Effect::LoadAccount => self.refresh_keys(None, ctx),
                 Effect::LoadFriends => self.refresh_friends(ctx),
@@ -859,7 +892,7 @@ impl SessionActor {
             GameFx::Record { key, best } if game == GameId::Snake => {
                 let store = self.shared.store.clone();
                 let (account, fp) = (self.account_id(), self.fingerprint());
-                actix::spawn(async move {
+                self.shared.store.spawn_write(async move {
                     let saved = match (account, fp) {
                         (Some(id), _) => store.save_account_record(id, &key, best).await,
                         (None, Some(fp)) => store.save_record(&fp, &key, best).await,
@@ -1153,8 +1186,7 @@ impl SessionActor {
                         app.update_room(latest)
                     } else {
                         // The room is gone. Its last view may say why.
-                        app.room_closed(reason);
-                        Vec::new()
+                        app.room_closed(reason)
                     };
                     if open && app.in_room() {
                         let watch = act.watch_room(view, stay, ctx);
@@ -1261,8 +1293,9 @@ impl SessionActor {
         let store = self.shared.store.clone();
         let (account, fingerprint) = (self.account_id(), self.fingerprint());
         for (game, text) in unsaved.prefs {
-            let (store, fingerprint) = (store.clone(), fingerprint.clone());
-            actix::spawn(async move {
+            let (writer, fingerprint) = (store.clone(), fingerprint.clone());
+            store.spawn_write(async move {
+                let store = writer;
                 let saved = match (account, fingerprint) {
                     (Some(id), _) => store.save_account_prefs(id, game, &text).await,
                     (None, Some(fp)) => store.save_prefs(&fp, game, &text).await,
@@ -1274,8 +1307,9 @@ impl SessionActor {
             });
         }
         if let Some(game) = unsaved.last_game {
-            let (store, fingerprint) = (store.clone(), fingerprint.clone());
-            actix::spawn(async move {
+            let (writer, fingerprint) = (store.clone(), fingerprint.clone());
+            store.spawn_write(async move {
+                let store = writer;
                 let saved = match (account, fingerprint) {
                     (Some(id), _) => store.set_account_last_game(id, game).await,
                     (None, Some(fp)) => store.set_last_game(&fp, game).await,
@@ -1290,8 +1324,9 @@ impl SessionActor {
             && let (Some(fp), Some(player)) = (fingerprint, self.player.as_ref())
         {
             let nick = player.nick.clone();
-            actix::spawn(async move {
-                if let Err(e) = store.set_nick(&fp, &nick).await {
+            let writer = store.clone();
+            store.spawn_write(async move {
+                if let Err(e) = writer.set_nick(&fp, &nick).await {
                     warn!(error = %e, "couldn't save a nickname");
                 }
             });
@@ -1306,6 +1341,13 @@ impl SessionActor {
                 Screen::Joining { .. } | Screen::JoiningBots => app.join_failed(why),
                 Screen::JoiningToWatch => app.watch_failed(why),
                 Screen::Form(_) => app.form_failed(why),
+                // Not queued after all: back home, and out of the queue in
+                // case an earlier ticket is still in it.
+                Screen::Finding => {
+                    app.queue_failed(why);
+                    self.queued = None;
+                    self.shared.matchmaker.do_send(Dequeue(self.id));
+                }
                 _ => app.notify(why),
             }
         }
@@ -1427,7 +1469,10 @@ impl SessionActor {
     fn on_wake(&mut self, ctx: &mut Context<Self>) {
         let Some(app) = self.app.as_mut() else { return };
         let now = Instant::now();
-        let effects = app.tick(now - self.last_tick);
+        let dt = now - self.last_tick;
+        let Ok(effects) = catch_unwind(AssertUnwindSafe(|| app.tick(dt))) else {
+            return self.broke("a tick", ctx);
+        };
         let waiting = self
             .queued
             .as_ref()
@@ -1440,19 +1485,32 @@ impl SessionActor {
     }
 
     fn check_idle(&mut self, ctx: &mut Context<Self>) {
-        let idle = self.shared.cfg.idle_timeout();
-        // Waiting for a match or watching a round isn't idling.
-        let playing = self.app.as_ref().is_some_and(|a| {
-            a.playing_alone()
-                || a.screen == Screen::Finding
-                || a.online
-                    .room
-                    .as_ref()
-                    .is_some_and(|r| !matches!(r.shell().phase, PhaseView::Waiting { .. }))
-        });
-        if self.app.is_some() && !playing && self.last_input.elapsed() > idle {
+        let Some(app) = self.app.as_mut() else { return };
+        // Waiting for a match, for a while, or watching a round isn't
+        // idling.
+        let idle = if app.screen == Screen::Finding {
+            QUEUE_IDLE
+        } else {
+            self.shared.cfg.idle_timeout()
+        };
+        let playing = app.playing_alone()
+            || app
+                .online
+                .room
+                .as_ref()
+                .is_some_and(|r| !matches!(r.shell().phase, PhaseView::Waiting { .. }));
+        let quiet = self.last_input.elapsed();
+        if playing {
+            return;
+        }
+        if quiet > idle {
             info!(peer = %self.peer, "idle; logging out");
-            self.close(0, Some("Logged out after being idle.\r\n"), ctx);
+            return self.close(0, Some("Logged out after being idle.\r\n"), ctx);
+        }
+        if quiet + IDLE_WARNING > idle && !self.warned_idle {
+            self.warned_idle = true;
+            app.notify("Still there? Press any key, or you'll be logged out in a minute.".into());
+            self.render(ctx);
         }
     }
 
@@ -1463,19 +1521,21 @@ impl SessionActor {
             return;
         }
         self.closing = true;
+        let mut last = Vec::new();
         if self.app.is_some() {
             if let Some(graphics) = &self.graphics {
-                self.send(Out::Data(Bytes::from_static(graphics.leave())));
+                last.extend_from_slice(graphics.leave());
             }
             if self.releases {
-                self.send(Out::Data(Bytes::from_static(RELEASES_OFF)));
+                last.extend_from_slice(RELEASES_OFF);
             }
-            self.send(Out::Data(Bytes::from_static(LEAVE_SCREEN)));
+            last.extend_from_slice(LEAVE_SCREEN);
         }
         if let Some(message) = message {
-            self.send(Out::Data(Bytes::from_static(message.as_bytes())));
+            last.extend_from_slice(message.as_bytes());
         }
-        if !self.send(Out::Close { exit_status })
+        let last = Bytes::from(last);
+        if !self.send(Out::Close { last, exit_status })
             && let Some(hangup) = &self.hangup
         {
             // No channel yet, or the client is stuck: just hang up.
@@ -1484,7 +1544,13 @@ impl SessionActor {
         ctx.stop();
     }
 
-    /// The game ends without the player quitting: keep the record it reached.
+    /// Game code panicked on `what`: the player is told, and logged out,
+    /// rather than the panic taking the worker's other players with it.
+    fn broke(&mut self, what: &str, ctx: &mut Context<Self>) {
+        warn!(peer = %self.peer, what, "the app panicked; closing");
+        self.close(1, Some(BROKE), ctx);
+    }
+
     /// The server is stopping: keeps the game's record, and logs out.
     fn goodbye(&mut self, ctx: &mut Context<Self>) {
         self.save_unfinished_game(ctx);
@@ -1511,6 +1577,7 @@ impl SessionActor {
         }
     }
 
+    /// The game ends without the player quitting: keep the record it reached.
     fn save_unfinished_game(&mut self, ctx: &mut Context<Self>) {
         if let Some(app) = self.app.as_mut() {
             let effects = app.unfinished();
@@ -1537,8 +1604,11 @@ async fn write_out(
                 }
                 unwritten.fetch_sub(1, Ordering::Relaxed);
             }
-            Out::Close { exit_status } => {
+            Out::Close { last, exit_status } => {
                 let goodbye = async {
+                    if !last.is_empty() {
+                        let _ = handle.data(channel, last).await;
+                    }
                     let _ = handle.exit_status_request(channel, exit_status).await;
                     let _ = handle.eof(channel).await;
                     let _ = handle.close(channel).await;
@@ -1647,6 +1717,7 @@ impl Handler<Input> for SessionActor {
         // anything: it mustn't keep an idle player connected.
         if answers == 0 || !keys.is_empty() || self.parser.pending_esc() {
             self.last_input = Instant::now();
+            self.warned_idle = false;
         }
         if answers > 0 {
             self.on_pong();
@@ -1668,7 +1739,10 @@ impl Handler<Input> for SessionActor {
 impl Handler<Resized> for SessionActor {
     type Result = ();
 
-    fn handle(&mut self, msg: Resized, ctx: &mut Self::Context) {
+    fn handle(&mut self, Resized(newest): Resized, ctx: &mut Self::Context) {
+        let Some(msg) = newest.lock().unwrap().take() else {
+            return;
+        };
         self.size = Self::clamp_size(msg.cols, msg.rows);
         self.pixels = msg.pixels;
         let area = Rect::new(0, 0, self.size.width, self.size.height);
@@ -1719,6 +1793,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_cells_of_a_sane_size_are_believed() {
+        assert_eq!(sane_cell((8, 16)), Some((8, 16)));
+        assert_eq!(sane_cell((7, 17)), Some((7, 17)));
+        for nonsense in [(0, 16), (80, 65535), (8, 8000), (64, 8), (2, 8), (8, 40)] {
+            assert_eq!(sane_cell(nonsense), None, "{nonsense:?}");
+        }
+    }
+
+    #[test]
     fn holds_count_once_they_outlast_a_retry() {
         let start = Instant::now();
         let mut hold = Hold::new(start);
@@ -1744,6 +1827,12 @@ mod tests {
     fn database_actions_are_costly_and_moves_are_not() {
         assert!(costly(&Effect::AddFriend("ann".into())));
         assert!(costly(&Effect::JoinRoom("ABCDEF".into())));
+        assert!(costly(&Effect::QuickPlay {
+            game: GameId::Snake,
+            pool: "duel",
+        }));
+        assert!(!costly(&Effect::LeaveQueue), "never refused");
+        assert!(costly(&Effect::AddBot));
         let steer = GameFx::Play(games::encode(&snake_core::round::SnakeInput::Turn(
             snake_core::geom::Direction::Up,
         )));

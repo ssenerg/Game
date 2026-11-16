@@ -15,27 +15,35 @@ pub fn draw(frame: &mut Frame, app: &App, selected: usize) {
     let Some(profile) = &online.account else {
         return;
     };
+    let rows = online.account_rows();
+    let categories = app.ui().ratings();
+    let height = rows.len() + categories.len() + 8;
+    // The logo goes when it would push rows off the screen.
+    let logo = if usize::from(frame.area().height) >= height + 4 + 3 {
+        4
+    } else {
+        0
+    };
     let [logo_area, body_area, footer_area] = Layout::vertical([
-        Constraint::Length(4),
+        Constraint::Length(logo),
         Constraint::Min(3),
         Constraint::Length(3),
     ])
     .areas(frame.area());
-    draw_logo(frame, app, logo_area);
+    if logo > 0 {
+        draw_logo(frame, app, logo_area);
+    }
 
-    let rows = online.account_rows();
-    let categories = app.ui().ratings();
-    let height = rows.len() + categories.len() + 8;
     let rect = centered_rect(body_area, 64, height as u16);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::DarkGray))
+        .border_style(super::dim())
         .title(format!(" {} ", profile.username))
         .title_alignment(Alignment::Center);
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = super::dim();
     let bold = Style::default().add_modifier(Modifier::BOLD);
     let mut lines = vec![Line::default()];
     // The open game's ratings, each kept apart.
@@ -65,8 +73,14 @@ pub fn draw(frame: &mut Frame, app: &App, selected: usize) {
     if online.keys.is_empty() {
         lines.push(Line::styled("    none", dim));
     }
+    // The selected row's line, which scrolling keeps in view.
+    let mut shown = 0;
     for (i, row) in rows.iter().enumerate() {
         let active = i == selected;
+        if active {
+            // Change password has a blank line above it.
+            shown = lines.len() + usize::from(*row == AccountRow::ChangePassword);
+        }
         let style = if active {
             Style::default()
                 .fg(Color::Yellow)
@@ -102,7 +116,9 @@ pub fn draw(frame: &mut Frame, app: &App, selected: usize) {
             AccountRow::Back => lines.push(Line::styled(format!("{marker}Back"), style)),
         }
     }
-    frame.render_widget(Paragraph::new(lines), inner);
+    let fits = usize::from(inner.height).max(1);
+    let scroll = (shown + 1).saturating_sub(fits) as u16;
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
 
     let status = match &online.notice {
         Some(notice) => Line::styled(

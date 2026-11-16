@@ -890,11 +890,9 @@ mod tests {
 
     #[test]
     fn when_time_runs_out_the_longest_snake_wins() {
-        let no_food = Rules {
-            food_interval_s: 0,
-            ..quick_rules()
-        };
-        let settings = RoomSettings::new(no_food, RoomKind::Match).unwrap();
+        // No food, which no room may choose.
+        let mut settings = RoomSettings::new(quick_rules(), RoomKind::Match).unwrap();
+        settings.game.food_interval_s = 0;
         let mut round = Room::new_match(settings, 1, vec![who(1), who(2)]);
         round.round_mut().unwrap().time_limit = Duration::from_secs(1);
         // Two snakes circling forever; one is longer.

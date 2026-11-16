@@ -10,10 +10,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Paragraph};
 use shell_tui::GameUi;
 use shell_tui::online::InRoom;
-use shell_tui::ui::{dialog, dim, ping_style, ping_text, secs};
+use shell_tui::ui::{dialog, dim, ping_dot, ping_style, ping_text, secs};
 use snake_core::config::{ColorSlot, Theme};
 use snake_core::geom::Point;
-use snake_core::round::{PhaseView, RoomView};
+use snake_core::round::{PhaseView, RoomKind, RoomView};
 use snake_core::view::{MatchView, SnakeView};
 
 use super::board::{BoardWidget, SnakeLook, item_look, snake_hints};
@@ -46,10 +46,10 @@ pub(crate) fn draw_round(frame: &mut Frame, app: &SnakeUi, room: &InRoom, releas
 
 /// How each snake on `board` is drawn for this player: their own in their
 /// theme's colors, the others in colors that stand apart from it.
-fn looks(app: &SnakeUi, room: &InRoom, board: &MatchView) -> Vec<SnakeLook> {
+fn looks(app: &SnakeUi, room: &InRoom, view: &RoomView, board: &MatchView) -> Vec<SnakeLook> {
     let theme = &app.cfg.theme;
     let mine = room.followed().and_then(|s| s.slot);
-    let others = opponent_colors(theme);
+    let others = opponent_colors(theme, view.settings.guns);
     let count = board
         .snakes
         .iter()
@@ -136,7 +136,7 @@ fn draw_match(
         }
         _ => String::new(),
     };
-    let block = Block::bordered()
+    let mut block = Block::bordered()
         .border_type(BorderType::Double)
         .border_style(dim())
         .title_top(
@@ -149,10 +149,30 @@ fn draw_match(
             .left_aligned(),
         )
         .title_top(Line::from(clock).right_aligned());
+    // A board bigger than the terminal says so on its frame, so the status
+    // line keeps the player's hints.
+    if cropped {
+        let (need_w, need_h) = room_size(board.width, board.height);
+        let needs = format!("needs {need_w}×{need_h}");
+        // The longest that fits on the frame.
+        let room = usize::from(board_w.saturating_sub(2));
+        let warning = [
+            format!(" part of the board · {needs} "),
+            format!(" part shown · {needs} "),
+            format!(" {needs} "),
+        ]
+        .into_iter()
+        .find(|text| text.chars().count() <= room);
+        if let Some(warning) = warning {
+            block = block.title_bottom(
+                Line::styled(warning, Style::default().fg(Color::LightRed)).centered(),
+            );
+        }
+    }
     let inner = block.inner(board_rect);
     frame.render_widget(block, board_rect);
 
-    let looks = looks(app, room, board);
+    let looks = looks(app, room, view, board);
     // The player's own snake, while it plays.
     let mine = room
         .my_seat()
@@ -179,19 +199,10 @@ fn draw_match(
     if score_w > 0 {
         draw_scores(frame, room, view, board, &app.cfg.theme, &looks, score_rect);
     }
-    // The size that would show the board whole, if this one doesn't.
-    let needs = cropped.then(|| room_size(board.width, board.height));
     let playing = app.in_play(room);
     frame.render_widget(
-        Paragraph::new(status_line(
-            room,
-            playing,
-            mine,
-            &app.cfg.theme,
-            releases,
-            needs,
-        ))
-        .alignment(Alignment::Center),
+        Paragraph::new(status_line(room, playing, mine, &app.cfg.theme, releases))
+            .alignment(Alignment::Center),
         status,
     );
     if let PhaseView::Countdown { left } = &view.shell.phase {
@@ -255,7 +266,7 @@ fn draw_scores(
                 Some(_) => spans.push(Span::styled(" ✖ ", dim())),
                 None => spans.push(Span::styled(" · ", dim())),
             }
-            let name: String = seat.who.name.chars().take(name_w).collect();
+            let name = fit_name(&seat.who.name, name_w);
             let style = if Some(seat.who.id) == followed {
                 Style::default()
                     .fg(Color::Yellow)
@@ -281,7 +292,10 @@ fn draw_scores(
             }
             match (ping_w, seat.ping) {
                 (0, _) => {}
-                (2, Some(ping)) => spans.push(Span::styled(" ●", ping_style(ping))),
+                (2, Some(ping)) => spans.push(Span::styled(
+                    format!(" {}", ping_dot(ping)),
+                    ping_style(ping),
+                )),
                 (_, Some(ping)) => spans.push(Span::styled(
                     format!("{:>ping_w$}", ping_text(ping, true)),
                     ping_style(ping),
@@ -302,25 +316,37 @@ fn draw_scores(
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+/// `name` in `width` columns: whole if it fits, or cut in the middle,
+/// where names that start alike, like guests', differ least.
+fn fit_name(name: &str, width: usize) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    if chars.len() <= width || width < 3 {
+        return chars.iter().take(width).collect();
+    }
+    let tail = (width - 1) / 2 + 1;
+    let head = width - 1 - tail;
+    let mut fitted: String = chars[..head].iter().collect();
+    fitted.push('…');
+    fitted.extend(&chars[chars.len() - tail..]);
+    fitted
+}
+
 fn status_line(
     room: &InRoom,
     playing: bool,
     mine: Option<&SnakeView>,
     theme: &Theme,
     releases: bool,
-    needs: Option<(u16, u16)>,
 ) -> Line<'static> {
     let warn = Style::default()
         .fg(Color::Yellow)
         .add_modifier(Modifier::BOLD);
     if room.confirm_leave {
-        return Line::styled("Leave the match? y leave · n stay", warn);
-    }
-    if let Some((need_w, need_h)) = needs {
-        return Line::styled(
-            format!("Terminal too small: showing part of the board (needs {need_w}×{need_h})"),
-            Style::default().fg(Color::LightRed),
-        );
+        let what = match room.shell().kind {
+            RoomKind::Match => "Leave the match?",
+            RoomKind::Private => "Leave the round?",
+        };
+        return Line::styled(format!("{what} y leave · n stay"), warn);
     }
     if let Some(friend) = &room.watching {
         return Line::styled(format!("Watching {friend} · Esc leave"), dim());
@@ -379,4 +405,18 @@ fn draw_countdown(frame: &mut Frame, room: &InRoom, looks: &[SnakeLook], left: D
         lines.push(Line::styled("You'll play the next round", dim()));
     }
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fit_name;
+
+    #[test]
+    fn long_names_are_cut_in_the_middle() {
+        assert_eq!(fit_name("ann", 6), "ann");
+        assert_eq!(fit_name("~player-0a1b", 6), "~p…a1b");
+        assert_eq!(fit_name("~player-0a1b", 8), "~pl…0a1b");
+        assert_eq!(fit_name("~player-0a1b", 12), "~player-0a1b");
+        assert_eq!(fit_name("~player-0a1b", 2), "~p");
+    }
 }

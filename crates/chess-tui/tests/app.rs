@@ -775,3 +775,24 @@ fn a_premove_can_be_called_off_or_turned_off() {
     assert!(shown(&app, 80, 24).contains("Wait for your move."));
     assert_eq!(inputs(&moved(&mut app, playing(&["e2e4"]))), []);
 }
+
+#[test]
+fn a_game_against_the_computer_from_pairing_offers_another_match() {
+    use game_api::{Game, PhaseView, Room, RoomKind, RoomSettings};
+    let settings = ChessSettings {
+        control: TimeControl::minutes(5, 3),
+        side: Side::White,
+        level: 3,
+    };
+    let settings = RoomSettings::new(settings, RoomKind::Match).unwrap();
+    let players = vec![entrant(ANN), chess_core::round::Chess::bot(0)];
+    let mut room = Room::new_match(settings, 1, players);
+    room.advance(std::time::Duration::from_secs(5));
+    assert!(matches!(room.view().shell.phase, PhaseView::Running { .. }));
+    room.play(ANN, ChessInput::Resign, None);
+    assert!(matches!(room.view().shell.phase, PhaseView::Results { .. }));
+    let screen = shown(&app_in(ANN, room.view()), 80, 24);
+    // Enter opens quick pairing, which keeps the choice of the computer.
+    assert!(screen.contains("Enter find another match"), "{screen}");
+    assert!(!screen.contains("again ·"), "{screen}");
+}

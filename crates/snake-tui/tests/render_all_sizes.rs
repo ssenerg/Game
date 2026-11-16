@@ -606,8 +606,8 @@ fn smallest_and_largest_boards_draw() {
             height,
             ..Rules::default()
         };
-        // Two columns per cell, plus border and padding.
-        let (need_w, need_h) = (width * 2 + 6, height + 4);
+        // Two columns per cell, plus the border; padding only if it fits.
+        let (need_w, need_h) = (width * 2 + 2, height + 2);
         assert!(ui::board_fits(width, height, Size::new(need_w, need_h)));
         assert!(!ui::board_fits(
             width,
@@ -624,6 +624,7 @@ fn smallest_and_largest_boards_draw() {
             (need_w - 1, need_h),
             (need_w, need_h - 1),
             (need_w, need_h),
+            (need_w + 4, need_h + 2),
             (200, 60),
         ];
         draw_all(&screens(&rules), &sizes);
@@ -750,6 +751,119 @@ fn round_trips_show_by_each_player() {
     assert!(wide.contains("45ms") && wide.contains("1.5s"), "{wide}");
     let narrow = shown(&app, 80, 24);
     assert!(narrow.contains('●') && !narrow.contains("45ms"), "{narrow}");
+    assert!(
+        narrow.contains('○'),
+        "a bad ping has a shape of its own:\n{narrow}"
+    );
+}
+
+#[test]
+fn a_game_paused_for_a_small_terminal_says_what_it_needs() {
+    let mut app = app_with(GameConfig::default(), "~p");
+    app.screen = Screen::Game;
+    let snake_ui = snake(&mut app);
+    snake_ui.game = Some(SoloGame::new(Rules::default()).unwrap());
+    snake_ui.screen = SnakeScreen::Paused { selected: 0 };
+    let (w, h) = ui::board_needs(30, 20);
+    let small = shown(&app, w - 1, h);
+    assert!(
+        small.contains(&format!("Needs a {w}×{h} terminal to resume")),
+        "{small}"
+    );
+    let fits = shown(&app, w, h);
+    assert!(!fits.contains("to resume"), "{fits}");
+}
+
+#[test]
+fn snakes_own_screens_show_what_the_app_has_to_say() {
+    let warning = "Still there? Press any key, or you'll be logged out in a minute.";
+    for screen in [
+        SnakeScreen::Menu,
+        SnakeScreen::Paused { selected: 0 },
+        SnakeScreen::GameOver { new_record: false },
+        SnakeScreen::QuickPlay { selected: 0 },
+    ] {
+        let mut app = app_with(GameConfig::default(), "~p");
+        app.screen = Screen::Game;
+        let snake_ui = snake(&mut app);
+        snake_ui.game = Some(SoloGame::new(Rules::default()).unwrap());
+        snake_ui.screen = screen;
+        app.notify(warning.to_string());
+        let text = shown(&app, 80, 24);
+        assert!(text.contains(warning), "{screen:?}:\n{text}");
+        if screen == SnakeScreen::Menu {
+            assert!(text.contains("Enter play"), "the keys stay:\n{text}");
+        }
+    }
+}
+
+#[test]
+fn a_match_against_bots_offers_them_again() {
+    let settings = RoomSettings::new(quick_rules(), RoomKind::Match).unwrap();
+    let bots = (0..3).map(bot_entrant);
+    let mut round = Room::new_match(settings, 3, [entrant(1)].into_iter().chain(bots).collect());
+    while !matches!(round.view().shell.phase, PhaseView::Results { .. }) {
+        round.advance(Duration::from_millis(100));
+    }
+    let mut app = app_with(GameConfig::default(), "~p");
+    app.screen = Screen::Room;
+    app.enter_room(1, Arc::new(round.view()));
+    let text = shown(&app, 100, 30);
+    assert!(text.contains("Enter play the bots again"), "{text}");
+}
+
+#[test]
+fn the_settings_say_what_bots_play_and_dim_what_guns_off_leaves_out() {
+    use ratatui::style::Modifier;
+    use snake_core::settings::SETTINGS;
+    let at = |key: &str| SETTINGS.iter().position(|s| s.key == key).unwrap();
+    let menu = |rules: Rules, selected: usize| {
+        let mut app = app_with(
+            GameConfig {
+                rules,
+                ..GameConfig::default()
+            },
+            "~p",
+        );
+        app.screen = Screen::Game;
+        snake(&mut app).selected = selected;
+        app
+    };
+    let with_bots = Rules {
+        bots: 2,
+        ..Rules::default()
+    };
+    let text = shown(&menu(with_bots, at("move_timing")), 80, 60);
+    assert!(text.contains("instant ▸ (bots: on tick)"), "{text}");
+    assert!(text.contains("5 s (bots: off)"), "{text}");
+    let text = shown(&menu(Rules::default(), at("move_timing")), 80, 60);
+    assert!(!text.contains("(bots:"), "{text}");
+
+    // Where a row's label starts, and whether it's dimmed.
+    let dimmed = |app: &App, label: &str| {
+        let text = shown(app, 80, 60);
+        let (y, line) = text
+            .lines()
+            .enumerate()
+            .find(|(_, line)| line.contains(label))
+            .unwrap_or_else(|| panic!("{label} in:\n{text}"));
+        let x = line[..line.find(label).unwrap()].chars().count();
+        drawn(app, 80, 60)[(x as u16, y as u16)]
+            .modifier
+            .contains(Modifier::DIM)
+    };
+    let off = menu(Rules::default(), at("guns"));
+    assert!(dimmed(&off, "gun spawns every"));
+    assert!(!dimmed(&off, "board width"));
+    let on = menu(
+        Rules {
+            guns: true,
+            bots: 1,
+            ..Rules::default()
+        },
+        at("guns"),
+    );
+    assert!(!dimmed(&on, "gun spawns every"));
 }
 
 #[test]

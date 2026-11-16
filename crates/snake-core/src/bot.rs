@@ -164,13 +164,7 @@ fn aim(world: &World, id: u8, dir: Direction, kind: Item) -> Option<usize> {
         line.push(next);
         p = next;
     }
-    let others: HashSet<Point> = world
-        .snakes
-        .iter()
-        .filter(|s| s.alive() && s.id != id)
-        .flat_map(|s| s.body.iter().copied())
-        .filter(|&p| !world.smoky(p))
-        .collect();
+    let others = others_seen(world, id);
     match kind {
         Item::Grenade => {
             let r = world.rules.grenade_radius;
@@ -190,6 +184,19 @@ fn aim(world: &World, id: u8, dir: Direction, kind: Item) -> Option<usize> {
     }
 }
 
+/// The cells of other snakes that snake `id` sees: not those under smoke.
+fn others_seen(world: &World, id: u8) -> HashSet<Point> {
+    let smoked = world.smoke_map();
+    let w = world.width as usize;
+    world
+        .snakes
+        .iter()
+        .filter(|s| s.alive() && s.id != id)
+        .flat_map(|s| s.body.iter().copied())
+        .filter(|p| !smoked[p.y as usize * w + p.x as usize])
+        .collect()
+}
+
 /// Which way snake `id` should go next on `world`, as well as its level
 /// sees; `None` if it's dead. Under smoke it sees only walls and its own
 /// body.
@@ -198,7 +205,8 @@ pub fn choose(world: &World, id: u8) -> Option<Direction> {
     let style = Style::of(world.rules.bot_level);
     let (w, h) = (world.width, world.height);
     let at = |p: Point| p.y as usize * w as usize + p.x as usize;
-    let seen = |p: Point| !world.smoky(p);
+    let smoked = world.smoke_map();
+    let seen = |p: Point| !smoked[at(p)];
 
     // Cells that kill whoever moves in next step: walls, bodies and poison.
     // A tail moves away, unless the snake is growing and its last cell
@@ -288,13 +296,7 @@ pub fn fires(world: &World, id: u8, dir: Direction) -> bool {
         Item::Pistol => PISTOL_RANGE,
         Item::Grenade | Item::Flashbang | Item::Smoke => return false,
     };
-    let others: HashSet<Point> = world
-        .snakes
-        .iter()
-        .filter(|s| s.alive() && s.id != id)
-        .flat_map(|s| s.body.iter().copied())
-        .filter(|&p| !world.smoky(p))
-        .collect();
+    let others = others_seen(world, id);
     let head = wrap_next(me.head(), dir, world.width, world.height);
     world
         .line_of_fire(head, dir, reach)

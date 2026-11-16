@@ -533,11 +533,12 @@ fn draw_asking(frame: &mut Frame, ui: &ChessUi, game: &GameView, me: piece::Colo
             ui.hits.add(at.intersection(inner), Hit::Promote(i));
         }
     } else if desk.confirm_resign {
+        // Keeping on is what Enter, and any key but y, does.
         let (resign, keep) = (" Resign ", " Keep playing ");
         let buttons = Line::from(vec![
-            Span::styled(resign, chosen),
+            Span::styled(resign, Style::default().fg(Color::LightRed)),
             Span::raw("   "),
-            Span::styled(keep, Style::default().add_modifier(Modifier::REVERSED)),
+            Span::styled(keep, chosen),
         ]);
         let lines = vec![
             Line::from("Resign this game?"),
@@ -567,6 +568,7 @@ fn draw_asking(frame: &mut Frame, ui: &ChessUi, game: &GameView, me: piece::Colo
                     Line::from(item.label())
                 }
             })
+            .chain([Line::styled("↑↓ Enter · Esc back", dim())])
             .collect();
         let inner = box_over(" Game ", lines, 24);
         for i in 0..items.len() {

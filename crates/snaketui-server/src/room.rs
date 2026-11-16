@@ -5,7 +5,7 @@
 //! A room never waits on its players. It publishes each new view on a watch
 //! channel, and every session reads the latest one at its own pace.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -548,13 +548,22 @@ pub struct RoomActor<G: Served> {
     ratings: Option<Ratings>,
     /// The last rated round's changes, shown with its results.
     changes: Vec<RatingChange>,
+    /// Players who left the round before it got going, such as one whose
+    /// leaving the queue crossed with their match forming: it doesn't rate
+    /// them.
+    left_before_go: HashSet<PlayerId>,
     last: Instant,
     /// When the timer was meant to fire.
     due: Instant,
+    timer: Option<SpawnHandle>,
     over_since: Option<Instant>,
     /// The server is stopping; the room closes once its round is over.
     draining: bool,
     closing_soon: bool,
+    /// Closed: nothing more happens in it.
+    closed: bool,
+    /// Its view couldn't be built: it closes at the next chance.
+    broken: bool,
 }
 
 impl<G: Served> Actor for RoomActor<G> {
@@ -565,8 +574,12 @@ impl<G: Served> Actor for RoomActor<G> {
         self.last = Instant::now();
         self.schedule(ctx);
     }
+}
 
-    fn stopped(&mut self, _: &mut Self::Context) {
+/// A room leaves this server's lists however it ends, even if its actor
+/// panicked and never stopped.
+impl<G: Served> Drop for RoomActor<G> {
+    fn drop(&mut self) {
         debug!(game = %G::ID, code = ?self.code, "room closed");
         if let Some((id, rooms)) = self.registered.take() {
             for &account in &self.seated {
@@ -617,25 +630,77 @@ impl<G: Served> RoomActor<G> {
             rejoin_within: REJOIN_WITHIN,
             ratings,
             changes: Vec::new(),
+            left_before_go: HashSet::new(),
             last: now,
             due: now,
+            timer: None,
             over_since: None,
             draining: false,
             closing_soon: false,
+            closed: false,
+            broken: false,
         };
         (room, rx)
     }
 
+    /// Wakes the room when its next thing is due, unless a wake already
+    /// set comes sooner: only ever earlier, so players' messages, however
+    /// many, never put off the room's own wake.
     fn schedule(&mut self, ctx: &mut Context<Self>) {
+        if self.closed {
+            if let Some(timer) = self.timer.take() {
+                ctx.cancel_future(timer);
+            }
+            return;
+        }
         let delay = self
             .room
             .until_next()
             .clamp(Duration::from_millis(1), Duration::from_secs(1));
-        self.due = Instant::now() + delay;
-        ctx.run_later(delay, |act, ctx| act.on_timer(ctx));
+        let due = Instant::now() + delay;
+        if self.timer.is_some() && self.due <= due {
+            return;
+        }
+        if let Some(timer) = self.timer.take() {
+            ctx.cancel_future(timer);
+        }
+        self.due = due;
+        self.timer = Some(ctx.run_later(delay, |act, ctx| {
+            act.timer = None;
+            act.on_timer(ctx);
+        }));
+    }
+
+    /// Brings the room's clock up to now, so what a player does is timed
+    /// by when it came rather than by the room's last wake: a chess move
+    /// is charged to the right clock. Returns whether the room is still
+    /// open.
+    fn catch_up(&mut self, ctx: &mut Context<Self>) -> bool {
+        if self.closed {
+            return false;
+        }
+        let now = Instant::now();
+        let dt = now - self.last;
+        self.last = now;
+        if let Some(end) = self.guarded(ctx, |room| room.advance(dt)) {
+            self.on_end(end, ctx);
+        }
+        !self.closed
+    }
+
+    /// After a player's message: closes a room that broke, or wakes it
+    /// for whatever is due now.
+    fn settle(&mut self, ctx: &mut Context<Self>) {
+        if self.broken {
+            self.close(BROKEN, ctx);
+        }
+        self.schedule(ctx);
     }
 
     fn on_timer(&mut self, ctx: &mut Context<Self>) {
+        if self.closed {
+            return;
+        }
         let now = Instant::now();
         if self.room.in_play() {
             TICK_LAG.record(now.saturating_duration_since(self.due));
@@ -649,8 +714,11 @@ impl<G: Served> RoomActor<G> {
         };
         self.on_end(end, ctx);
         self.publish();
+        if self.broken {
+            return self.close(BROKEN, ctx);
+        }
         if self.room.is_empty() {
-            return ctx.stop();
+            return self.stop(ctx);
         }
         if self.draining && !self.room.in_play() && !self.closing_soon {
             self.closing_soon = true;
@@ -723,6 +791,9 @@ impl<G: Served> RoomActor<G> {
         self.pings.remove(&id);
         self.away.remove(&id);
         self.accounts.remove(&id);
+        if self.room.plays(id) && !self.room.running() {
+            self.left_before_go.insert(id);
+        }
         if let Some(end) = self.guarded(ctx, |room| room.leave(id)) {
             self.on_end(end, ctx);
         }
@@ -741,11 +812,12 @@ impl<G: Served> RoomActor<G> {
     /// closes meanwhile.
     fn rate(&mut self, placements: &[Placement], ctx: &mut Context<Self>) {
         self.changes.clear();
+        let unrated = std::mem::take(&mut self.left_before_go);
         let Some(ratings) = &self.ratings else {
             return;
         };
         let winner = game_api::winner(placements).map(|w| w.id);
-        let rated = rated_players(placements, &ratings.members);
+        let rated = rated_players(placements, &ratings.members, &unrated);
         // Rated against nobody: nothing changes.
         if rated.len() < 2 {
             return;
@@ -759,7 +831,7 @@ impl<G: Served> RoomActor<G> {
             .map(|&(id, _, _)| (id, ratings.members.get(&id).map(|m| m.notify.clone())))
             .collect();
         let (key, store, room) = (ratings.key, ratings.store.clone(), ctx.address());
-        actix::spawn(async move {
+        ratings.store.spawn_write(async move {
             let changes = match store.rate_round(key, &players).await {
                 Ok(changes) => changes,
                 Err(e) => return warn!(error = %e, "couldn't save ratings"),
@@ -808,16 +880,32 @@ impl<G: Served> RoomActor<G> {
         }
     }
 
+    /// Sends the room's view to everyone in it. A view that panics to
+    /// build breaks the room, which closes at the next chance.
     fn publish_now(&mut self) {
+        if self.closed || self.broken {
+            return;
+        }
         self.list_seated();
-        self.view.send_replace(Arc::new(view_of(
-            &self.room,
-            &self.code,
-            &self.changes,
-            &self.pings,
-            &self.away,
-            self.watchers.len(),
-        )));
+        let view = catch_unwind(AssertUnwindSafe(|| {
+            view_of(
+                &self.room,
+                &self.code,
+                &self.changes,
+                &self.pings,
+                &self.away,
+                self.watchers.len(),
+            )
+        }));
+        match view {
+            Ok(view) => {
+                self.view.send_replace(Arc::new(view));
+            }
+            Err(_) => {
+                warn!(game = %G::ID, code = ?self.code, "a room's view panicked; closing it");
+                self.broken = true;
+            }
+        }
     }
 
     /// Keeps [`LocalRooms`]' list of the accounts seated in this room's
@@ -848,7 +936,17 @@ impl<G: Served> RoomActor<G> {
         self.seated = now;
     }
 
+    /// Stops a room nobody is in.
+    fn stop(&mut self, ctx: &mut Context<Self>) {
+        self.closed = true;
+        ctx.stop();
+    }
+
     fn close(&mut self, reason: &str, ctx: &mut Context<Self>) {
+        if self.closed {
+            return;
+        }
+        self.closed = true;
         let last = self.view.borrow().closed(reason);
         self.view.send_replace(last);
         ctx.stop();
@@ -868,7 +966,7 @@ impl<G: Served> RoomActor<G> {
                 }
                 self.publish();
                 if self.room.is_empty() {
-                    ctx.stop();
+                    self.stop(ctx);
                 }
             }
             RoomCmd::Ping(rtt) => {
@@ -923,13 +1021,15 @@ impl<G: Served> RoomActor<G> {
 
 /// Who a round rates, with their account and place: accounts only, each
 /// once. Guests aren't rated, and beating them doesn't count; an account
-/// that played twice isn't rated at all.
+/// that played twice isn't rated at all, nor is anyone `unrated`.
 fn rated_players(
     placements: &[Placement],
     members: &HashMap<PlayerId, RatedMember>,
+    unrated: &HashSet<PlayerId>,
 ) -> Vec<(PlayerId, AccountId, usize)> {
     let accounts: Vec<(PlayerId, AccountId, usize)> = placements
         .iter()
+        .filter(|p| !unrated.contains(&p.who.id))
         .filter_map(|p| {
             let account = members.get(&p.who.id)?.account?;
             Some((p.who.id, account, p.place))
@@ -971,6 +1071,9 @@ impl<G: Served> Handler<Join> for RoomActor<G> {
     type Result = Result<ViewRx, JoinError>;
 
     fn handle(&mut self, msg: Join, ctx: &mut Self::Context) -> Self::Result {
+        if !self.catch_up(ctx) {
+            return Err(JoinError::Closed);
+        }
         let id = msg.who.id;
         let joined = self
             .guarded(ctx, |room| room.join(msg.who))
@@ -981,6 +1084,7 @@ impl<G: Served> Handler<Join> for RoomActor<G> {
             self.accounts.insert(id, account);
         }
         self.publish();
+        self.settle(ctx);
         Ok(self.view.subscribe())
     }
 }
@@ -991,6 +1095,9 @@ impl<G: Served> Handler<Rejoin> for RoomActor<G> {
     /// The account's seat in the round goes to its new connection, whether
     /// the old one is known to be gone yet or not.
     fn handle(&mut self, msg: Rejoin, ctx: &mut Self::Context) -> Self::Result {
+        if !self.catch_up(ctx) {
+            return Err(JoinError::Closed);
+        }
         let new = msg.who.id;
         let old = self
             .accounts
@@ -1019,6 +1126,7 @@ impl<G: Served> Handler<Rejoin> for RoomActor<G> {
         }
         debug!(game = %G::ID, code = ?self.code, player = new, "back in their seat");
         self.publish_now();
+        self.settle(ctx);
         Ok(self.view.subscribe())
     }
 }
@@ -1055,7 +1163,11 @@ impl<G: Served> Handler<Cmd> for RoomActor<G> {
     type Result = ();
 
     fn handle(&mut self, Cmd { id, cmd }: Cmd, ctx: &mut Self::Context) {
+        if !self.catch_up(ctx) {
+            return;
+        }
         self.command(id, cmd, ctx);
+        self.settle(ctx);
     }
 }
 
@@ -1192,6 +1304,63 @@ mod tests {
         }
         until(view, |v| matches!(v.shell.phase, PhaseView::Running { .. })).await;
         here
+    }
+
+    #[actix_rt::test]
+    async fn a_move_is_charged_by_when_it_came_not_by_the_last_tick() {
+        let (room, mut view, _) = chess_room(REJOIN_WITHIN);
+        let _here = started(&room, &mut view, true).await;
+        play(&room, 1, "e2e4");
+        play(&room, 2, "e7e5");
+        let moved =
+            |n| move |v: &RoomView<Chess>| v.game.as_ref().is_some_and(|g| g.moves.len() == n);
+        let before = until(&mut view, moved(2))
+            .await
+            .game
+            .as_ref()
+            .unwrap()
+            .clocks[0];
+        // White's clock runs now; the room next wakes on its whole second.
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        play(&room, 1, "g1f3");
+        let after = until(&mut view, moved(3))
+            .await
+            .game
+            .as_ref()
+            .unwrap()
+            .clocks[0];
+        assert!(
+            before.saturating_sub(after) >= Duration::from_millis(550),
+            "white took 600 ms but was charged {:?}",
+            before.saturating_sub(after)
+        );
+    }
+
+    #[actix_rt::test]
+    async fn players_messages_never_put_off_the_rooms_own_wake() {
+        let (room, mut view, _) = chess_room(REJOIN_WITHIN);
+        // Alone in the lobby, nothing is due for a second at a time.
+        let seat = Arc::new(());
+        room.join(who(1), None, Arc::downgrade(&seat))
+            .await
+            .unwrap();
+        let watcher = Arc::new(());
+        room.watch(who(3), Arc::downgrade(&watcher)).await.unwrap();
+        until(&mut view, |v| v.shell.watchers == 1).await;
+        // The watcher's connection goes without a word, so only the room's
+        // own wake notices; meanwhile the player pings faster than that.
+        drop(watcher);
+        let pinging = {
+            let room = room.clone();
+            actix_rt::spawn(async move {
+                loop {
+                    room.send(1, RoomCmd::Ping(Duration::from_millis(40)));
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            })
+        };
+        until(&mut view, |v| v.shell.watchers == 0).await;
+        pinging.abort();
     }
 
     #[actix_rt::test]
@@ -1368,6 +1537,67 @@ mod tests {
         assert_eq!((blitz.1.games, blitz.1.wins), (1, 1));
     }
 
+    #[actix_rt::test]
+    async fn a_player_gone_as_the_game_starts_aborts_it_unrated() {
+        let store = Store::open("sqlite::memory:").await.unwrap();
+        let mut accounts = Vec::new();
+        for name in ["ann", "ben"] {
+            let account = store
+                .create_account(name, "x", None, &[], &Default::default())
+                .await
+                .unwrap()
+                .unwrap();
+            accounts.push(account.id);
+        }
+        let key = RatingKey {
+            game: GameId::Chess,
+            category: "blitz",
+        };
+        let (ann, ben) = (Heard::default(), Heard::default());
+        let member = |account, heard: &Heard| RatedMember {
+            account: Some(account),
+            rating: Skill::new(games::RatingSystem::Glicko2),
+            notify: RatedNotify::Here(heard.ears()),
+        };
+        let ratings = Ratings {
+            key,
+            store: store.clone(),
+            members: HashMap::from([
+                (1, member(accounts[0], &ann)),
+                (2, member(accounts[1], &ben)),
+            ]),
+        };
+        let (room, mut view, _) = rated_chess_room(Duration::from_millis(300), Some(ratings));
+        let mut here = [Arc::new(()), Arc::new(())];
+        for ((id, presence), account) in [1, 2].into_iter().zip(&here).zip(&accounts) {
+            room.join(who(id), Some(*account), Arc::downgrade(presence))
+                .await
+                .unwrap();
+        }
+        // Ben's connection goes as the game is about to start, and he
+        // never comes back: he never moves, so the game is aborted, and
+        // nobody is rated.
+        here[1] = Arc::new(());
+        for id in [1, 2] {
+            room.send(id, RoomCmd::Ready);
+        }
+        let over = until(&mut view, |v| {
+            matches!(v.shell.phase, PhaseView::Results { .. })
+        })
+        .await;
+        let outcome = over.game.as_ref().and_then(|g| g.outcome);
+        assert_eq!(
+            outcome.map(|o| o.termination),
+            Some(chess_core::outcome::Termination::Aborted)
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(ann.heard().is_empty() && ben.heard().is_empty());
+        for account in accounts {
+            let saved = store.ratings(account).await.unwrap();
+            assert!(!saved.iter().any(|(k, _)| *k == key), "{saved:?}");
+        }
+    }
+
     #[test]
     fn only_accounts_are_rated_each_once() {
         let member = |account| RatedMember {
@@ -1392,9 +1622,14 @@ mod tests {
             })
             .collect();
         assert_eq!(
-            rated_players(&placements, &members),
+            rated_players(&placements, &members, &HashSet::new()),
             [(1, 10, 1), (5, 50, 5)],
             "no guest, and not the account that played twice"
+        );
+        assert_eq!(
+            rated_players(&placements, &members, &HashSet::from([5])),
+            [(1, 10, 1)],
+            "nor one who left before the round got going"
         );
     }
 

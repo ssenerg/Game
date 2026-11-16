@@ -13,7 +13,9 @@ use ratatui::backend::TestBackend;
 use ratatui::layout::Size;
 use ratatui::style::Color;
 
-use crate::online::{Category, HomeItem, InRoom, LeaderboardView, MyPlace, Profile, ShownRating};
+use crate::online::{
+    Category, FormKind, HomeItem, InRoom, KeyRow, LeaderboardView, MyPlace, Profile, ShownRating,
+};
 use crate::{App, Ctx, Effect, GameUi, Key, QuickPlay, QuickStart, Screen, ui};
 
 /// A game with nothing to it, played as Snake or as Chess, so the app
@@ -128,6 +130,28 @@ fn app(start: Option<GameId>) -> App {
     app
 }
 
+#[test]
+fn every_form_shows_its_keys_with_a_key_or_without() {
+    for has_key in [true, false] {
+        for kind in [FormKind::SignUp, FormKind::SignIn, FormKind::ChangePassword] {
+            let mut app = App::online(toys(), Some(GameId::Snake), "~ann".into(), has_key);
+            app.resize(Size::new(80, 24));
+            app.screen = Screen::Form(kind);
+            // An error long enough to take two lines.
+            app.form.error = Some(
+                "That username is taken, or isn't 3 to 16 letters, digits, _ or -. \
+                 Try another."
+                    .into(),
+            );
+            let text = shown(&app);
+            assert!(
+                text.contains("Esc back") && text.contains("Try another."),
+                "{kind:?}, key {has_key}:\n{text}"
+            );
+        }
+    }
+}
+
 /// A private room of `G` with player 1 seated.
 fn room_of<G: Game<Settings = ()>>() -> Arc<dyn AnyView> {
     let mut room = Room::<G>::new(RoomSettings::new((), RoomKind::Private).unwrap(), 1);
@@ -167,7 +191,49 @@ fn a_new_player_picks_a_game_and_can_leave_from_there() {
     assert_eq!(app.screen, Screen::Home { selected: 0 });
 
     let mut leaving = self::app(None);
+    assert_eq!(leaving.handle(Key::Char('q')), [], "asks first");
+    assert!(shown(&leaving).contains("Press q again to quit."));
     assert_eq!(leaving.handle(Key::Char('q')), [Effect::Quit]);
+}
+
+#[test]
+fn esc_gives_up_waiting_for_a_room() {
+    let mut app = app(Some(GameId::Snake));
+    for (waiting, back) in [
+        (Screen::JoiningBots, HomeItem::QuickPlay),
+        (Screen::Joining { by_code: true }, HomeItem::JoinCode),
+        (Screen::Joining { by_code: false }, HomeItem::CreateRoom),
+    ] {
+        app.screen = waiting;
+        app.handle(Key::Esc);
+        let items = app.home_items();
+        let at = items.iter().position(|&i| i == back).unwrap();
+        assert_eq!(app.screen, Screen::Home { selected: at }, "{waiting:?}");
+    }
+    app.screen = Screen::JoiningToWatch;
+    app.handle(Key::Esc);
+    assert_eq!(app.screen, Screen::Friends { selected: 0 });
+}
+
+#[test]
+fn home_quits_on_a_second_q_and_esc_only_points_at_quit() {
+    let mut app = app(Some(GameId::Snake));
+    assert_eq!(app.handle(Key::Esc), []);
+    let items = app.home_items();
+    let quit = items.iter().position(|&i| i == HomeItem::Quit).unwrap();
+    assert_eq!(app.screen, Screen::Home { selected: quit });
+    assert_eq!(app.handle(Key::Char('q')), []);
+    assert_eq!(app.handle(Key::Up), [], "another key, and it asks again");
+    assert_eq!(app.handle(Key::Char('q')), []);
+    assert_eq!(app.handle(Key::Char('q')), [Effect::Quit]);
+
+    // An invite answered in between counts as another key too.
+    let mut invited = self::app(Some(GameId::Snake));
+    assert_eq!(invited.handle(Key::Char('q')), []);
+    invited.invited("bob".into(), GameId::Snake);
+    assert_eq!(invited.handle(Key::Esc), [Effect::DismissInvite]);
+    assert_eq!(invited.handle(Key::Char('q')), [], "asks again");
+    assert_eq!(invited.handle(Key::Char('q')), [Effect::Quit]);
 }
 
 #[test]
@@ -282,7 +348,23 @@ fn invites_to_another_game_say_which() {
     assert!(banner.contains("bob invites you to play Chess"), "{banner}");
     app.invited("bob".into(), GameId::Snake);
     let banner = shown(&app);
-    assert!(banner.contains("bob invites you to play ·"), "{banner}");
+    assert!(banner.contains("bob invites you to play  "), "{banner}");
+    assert!(banner.contains("Enter join · Esc dismiss"), "{banner}");
+}
+
+#[test]
+fn enter_answers_an_invite_only_where_it_means_nothing_else() {
+    let mut app = app(Some(GameId::Snake));
+    app.invited("bob".into(), GameId::Snake);
+    // In a form, Enter moves to the next row and the invite waits.
+    app.screen = Screen::Form(FormKind::SignIn);
+    app.handle(Key::Enter);
+    assert!(app.online.invite.is_some());
+    assert!(shown(&app).contains("Answer it from Home"));
+    // At home it joins.
+    app.screen = Screen::Home { selected: 0 };
+    let effects = app.handle(Key::Enter);
+    assert!(effects.contains(&Effect::AcceptInvite), "{effects:?}");
 }
 
 #[test]
@@ -390,9 +472,72 @@ fn each_rating_has_its_own_leaderboard() {
 
     assert_eq!(app.handle(Key::Char('d')), [Effect::LoadLeaderboard(duels)]);
     assert_eq!(app.online.leaderboard, None, "loads afresh");
+    assert!(shown(&app).contains("Loading…"));
+    app.leaderboard_failed();
+    let failed = shown(&app);
+    assert!(
+        failed.contains("Couldn't load the leaderboard."),
+        "{failed}"
+    );
+    assert!(!failed.contains("Loading…"), "{failed}");
     assert_eq!(app.handle(Key::Left), [Effect::LoadLeaderboard(brawls)]);
+    assert!(
+        shown(&app).contains("Loading…"),
+        "asking again forgets it failed"
+    );
     app.handle(Key::Esc);
     assert!(matches!(app.screen, Screen::Home { .. }));
+}
+
+#[test]
+fn a_password_change_refused_keeps_the_current_one_unless_it_was_wrong() {
+    let mut app = app(Some(GameId::Snake));
+    sign_in(&mut app);
+    app.screen = Screen::Form(FormKind::ChangePassword);
+    let fill = |app: &mut App| {
+        for (secret, text) in [
+            (&mut app.form.current, "old password"),
+            (&mut app.form.password, "short"),
+            (&mut app.form.repeat, "short"),
+        ] {
+            secret.clear();
+            text.chars().for_each(|c| secret.push(c));
+        }
+    };
+    fill(&mut app);
+    app.form_failed("Passwords are at least 8 characters.".into());
+    assert_eq!(app.form.current.expose(), "old password");
+    assert!(app.form.password.is_empty() && app.form.repeat.is_empty());
+    assert_eq!(app.form.focus, 1, "on the new password");
+
+    fill(&mut app);
+    app.form_failed("That's not your current password.".into());
+    assert!(app.form.current.is_empty());
+    assert_eq!(app.form.focus, 0, "on the current password");
+}
+
+#[test]
+fn a_machine_is_forgotten_on_a_second_x_in_a_row() {
+    let mut app = app(Some(GameId::Snake));
+    sign_in(&mut app);
+    app.online.keys = (0..2)
+        .map(|i| KeyRow {
+            fingerprint: format!("SHA256:{i}"),
+            last_used: "today".into(),
+            this_machine: i == 0,
+        })
+        .collect();
+    app.screen = Screen::Account { selected: 0 };
+    assert_eq!(app.handle(Key::Char('x')), []);
+    assert!(shown(&app).contains("Press x again to forget this machine."));
+    // Moving away and back calls it off.
+    app.handle(Key::Down);
+    app.handle(Key::Up);
+    assert_eq!(app.handle(Key::Char('x')), [], "asks again");
+    assert_eq!(
+        app.handle(Key::Char('x')),
+        [Effect::ForgetKey("SHA256:0".into())]
+    );
 }
 
 #[test]

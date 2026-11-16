@@ -99,8 +99,8 @@ fn draw_invite(frame: &mut Frame, app: &App) {
     };
     let area = frame.area();
     let rect = Rect {
-        height: 3.min(area.height),
-        ..centered_rect(area, 56, 3)
+        height: 4.min(area.height),
+        ..centered_rect(area, 56, 4)
     };
     let rect = Rect { y: area.y, ..rect };
     frame.render_widget(Clear, rect);
@@ -114,16 +114,20 @@ fn draw_invite(frame: &mut Frame, app: &App) {
         .games()
         .find(|g| g.id() == invite.game && Some(invite.game) != app.game())
         .map_or(String::new(), |g| format!(" {}", g.title()));
-    let line = Line::from(format!(
-        "{} invites you to play{game} · Enter join · Esc dismiss",
-        invite.from
-    ))
-    .style(
-        Style::default()
-            .fg(Color::LightYellow)
-            .add_modifier(Modifier::BOLD),
-    );
-    frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), inner);
+    let style = Style::default()
+        .fg(Color::LightYellow)
+        .add_modifier(Modifier::BOLD);
+    // Enter and Esc answer it only where they mean nothing else.
+    let keys = if app.invite_answerable() {
+        "Enter join · Esc dismiss"
+    } else {
+        "Answer it from Home"
+    };
+    let lines = vec![
+        Line::styled(format!("{} invites you to play{game}", invite.from), style),
+        Line::styled(keys, style),
+    ];
+    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
 }
 
 /// A `width`×`height` rectangle in the middle of `area`, cut down to fit.
@@ -161,8 +165,10 @@ pub(crate) fn draw_logo(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(logo).alignment(Alignment::Center), area);
 }
 
+/// Hints and asides: dimmed rather than dark grey, which some themes use
+/// for their background, or render barely visible on light ones.
 pub fn dim() -> Style {
-    Style::default().fg(Color::DarkGray)
+    Style::default().add_modifier(Modifier::DIM)
 }
 
 /// Whole seconds left, counting a part of one as one.
@@ -185,6 +191,16 @@ pub fn ping_text(ping: Duration, tight: bool) -> String {
     match ping.as_millis() {
         ms @ 0..1000 => format!("{}{gap}ms", ms.max(1)),
         _ => format!("{:.1}{gap}s", ping.as_secs_f64()),
+    }
+}
+
+/// A one-cell ping: full while moves feel instant, half once they lag,
+/// empty when they lag badly, so it reads without its color too.
+pub fn ping_dot(ping: Duration) -> &'static str {
+    match ping.as_millis() {
+        0..80 => "●",
+        80..200 => "◐",
+        _ => "○",
     }
 }
 

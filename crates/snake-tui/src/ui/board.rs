@@ -242,7 +242,7 @@ impl Widget for BoardWidget<'_> {
             match look.number {
                 Some(n) => {
                     let style = Style::default()
-                        .fg(Color::Black)
+                        .fg(digit_on(look.head))
                         .bg(look.head)
                         .add_modifier(Modifier::BOLD);
                     paint(p, [DIGITS[n as usize % 10], " "], style);
@@ -254,6 +254,15 @@ impl Widget for BoardWidget<'_> {
         for &p in &view.smoke {
             paint(p, SMOKE, smoke);
         }
+    }
+}
+
+/// A number's color on a head of `head`: white on the dark ones, black on
+/// the rest.
+fn digit_on(head: Color) -> Color {
+    match head {
+        Color::Red | Color::Blue | Color::Magenta | Color::DarkGray | Color::Black => Color::White,
+        _ => Color::Black,
     }
 }
 

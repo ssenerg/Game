@@ -13,10 +13,10 @@ use tracing::{debug, warn};
 use crate::Shared;
 use crate::proxy::read_header;
 use crate::session::{Attach, Hangup, SessionActor};
+use crate::ssh::ConnHandler;
 
 /// A trusted proxy has this long to send its PROXY header.
 const PROXY_HEADER_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
-use crate::ssh::ConnHandler;
 
 /// How many connections are open, in total and per IP address.
 pub struct Limits {

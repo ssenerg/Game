@@ -33,6 +33,9 @@ impl<G: Game> RoomSettings<G> {
     /// `settings` as rooms play them; `None` when not even [`MIN_PLAYERS`]
     /// fit.
     pub fn new(settings: G::Settings, kind: RoomKind) -> Option<Self> {
+        if !G::allowed(&settings) {
+            return None;
+        }
         let game = G::for_rooms(settings);
         let max_players = G::seats(&game)?;
         Some(Self {
@@ -185,6 +188,11 @@ impl<G: Game> Room<G> {
     /// Whether a round is being played right now (including its countdown).
     pub fn in_play(&self) -> bool {
         matches!(self.phase, Phase::Countdown { .. } | Phase::Running)
+    }
+
+    /// Whether a round is under way, past its countdown.
+    pub fn running(&self) -> bool {
+        matches!(self.phase, Phase::Running)
     }
 
     /// Whether `id` has a part in the round being played.
@@ -457,7 +465,14 @@ impl<G: Game> Room<G> {
     fn begin_countdown(&mut self) {
         let players: Vec<Entrant> = self.seats.iter().map(|s| s.who.clone()).collect();
         let Some(round) = G::Round::start(&self.settings.game, &players, &mut self.rng) else {
+            // It tries again later, by other random numbers; meanwhile
+            // nobody stays ready for a round that didn't come.
+            for seat in &mut self.seats {
+                seat.ready = false;
+            }
             self.phase = Phase::Waiting { start_at: None };
+            self.arm_start_timer();
+            self.changed = true;
             return;
         };
         for (i, seat) in self.seats.iter_mut().enumerate() {
@@ -938,14 +953,24 @@ mod tests {
     }
 
     #[test]
-    fn a_round_that_cant_start_leaves_the_room_waiting() {
+    fn a_round_that_cant_start_waits_to_try_again() {
         let mut room = private(99);
         room.join(who(1)).unwrap();
         room.join(who(2)).unwrap();
-        room.advance(15 * S);
-        assert_eq!(phase(&room), PhaseView::Waiting { starts_in: None });
+        room.toggle_ready(1);
+        room.toggle_ready(2);
+        assert_eq!(
+            phase(&room),
+            PhaseView::Waiting {
+                starts_in: Some(15 * S)
+            }
+        );
         assert!(room.round().is_none());
         assert!(room.players() >= MIN_PLAYERS);
+        assert!(
+            room.view().shell.seats.iter().all(|s| !s.ready),
+            "nobody stays ready for it"
+        );
     }
 
     #[test]

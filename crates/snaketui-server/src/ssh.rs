@@ -3,6 +3,7 @@
 
 use std::borrow::Cow;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use actix::Addr;
@@ -10,14 +11,27 @@ use anyhow::{Context as _, Result};
 use bytes::Bytes;
 use russh::keys::{Algorithm, PrivateKey, PublicKey, ssh_key::LineEnding};
 use russh::server::{Auth, ChannelOpenHandle, Msg, Response, Session};
-use russh::{Channel, ChannelId, MethodKind, MethodSet, SshId};
+use russh::{Channel, ChannelId, MethodKind, MethodSet, Preferred, SshId, kex};
 use tracing::info;
 
 use crate::identity::Player;
 use crate::session::{
     Authenticated, ChannelOpened, Disconnected, Input, NEEDS_PTY, NO_COMMANDS, PtyRequested,
-    Refuse, Resized, SessionActor, ShellRequested,
+    Refuse, Resized, SessionActor, ShellRequested, WindowSize,
 };
+
+/// Key exchanges the server takes: the elliptic-curve ones only. The
+/// finite-field ones cost so much CPU on the worker's thread that a
+/// client could pick one, again and again, to stall every player there.
+const KEX: &[kex::Name] = &[
+    kex::MLKEM768X25519_SHA256,
+    kex::CURVE25519,
+    kex::CURVE25519_PRE_RFC_8731,
+    kex::EXTENSION_SUPPORT_AS_CLIENT,
+    kex::EXTENSION_SUPPORT_AS_SERVER,
+    kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT,
+    kex::EXTENSION_OPENSSH_STRICT_KEX_AS_SERVER,
+];
 
 pub fn config(host_key: PrivateKey) -> russh::server::Config {
     russh::server::Config {
@@ -41,6 +55,10 @@ pub fn config(host_key: PrivateKey) -> russh::server::Config {
         // Output waiting for russh to write it. Sessions hold frames for a
         // slow client themselves, to send the newest, so little need wait.
         event_buffer_size: 2,
+        preferred: Preferred {
+            kex: Cow::Borrowed(KEX),
+            ..Preferred::DEFAULT
+        },
         ..Default::default()
     }
 }
@@ -68,6 +86,8 @@ pub struct ConnHandler {
     /// The one session channel allowed per connection.
     channel: Option<ChannelId>,
     pty: bool,
+    /// The window's newest size, until the session takes it.
+    resized: Arc<Mutex<Option<WindowSize>>>,
 }
 
 impl ConnHandler {
@@ -76,6 +96,7 @@ impl ConnHandler {
             session,
             channel: None,
             pty: false,
+            resized: Arc::default(),
         }
     }
 
@@ -220,11 +241,18 @@ impl russh::server::Handler for ConnHandler {
         _session: &mut Session,
     ) -> Result<()> {
         if self.ours(channel) {
-            let _ = self.session.try_send(Resized {
+            // However many come, the session wakes once for the newest:
+            // never lost to a full mailbox, never piling up in it.
+            let mut newest = self.resized.lock().unwrap();
+            let waking = newest.is_some();
+            *newest = Some(WindowSize {
                 cols,
                 rows,
                 pixels: (pix_width, pix_height),
             });
+            if !waking {
+                self.session.do_send(Resized(Arc::clone(&self.resized)));
+            }
         }
         Ok(())
     }

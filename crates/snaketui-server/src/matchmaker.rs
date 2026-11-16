@@ -1,10 +1,10 @@
 //! The quick-play queue, as each server sees it.
 //!
 //! On its own, a server runs its [`Pools`] once a second and starts a room
-//! for every match they form, of the pool's game. In a cluster, it sends its waiting players to
-//! the cluster's queue (`snaketui-matchmaker`, see [`crate::queue_service`])
-//! instead. It then hosts the matches the queue gives it, and passes its
-//! players on to matches hosted elsewhere.
+//! for every match they form, of the pool's game. In a cluster, it sends
+//! its waiting players to the cluster's queue (`snaketui-matchmaker`, see
+//! [`crate::queue_service`]) instead. It then hosts the matches the queue
+//! gives it, and passes its players on to matches hosted elsewhere.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
@@ -31,7 +31,7 @@ use crate::store::{AccountId, Store};
 const RUN_EVERY: Duration = Duration::from_secs(1);
 /// In a cluster: every waiting player is sent to the queue again this
 /// often, in case a message went missing.
-const RESEND_EVERY: Duration = Duration::from_secs(15);
+pub(crate) const RESEND_EVERY: Duration = Duration::from_secs(15);
 
 /// Puts a player in `pool`'s queue. They get [`Matched`] once a match
 /// forms.

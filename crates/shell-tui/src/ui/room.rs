@@ -43,26 +43,27 @@ fn draw_lobby(
     let view = room.shell();
     let hosting = room.hosting();
     let watchers = u16::from(view.watchers > 0);
-    let height = 12 + view.seats.len() as u16 + u16::from(hosting) + watchers;
+    let height = 13 + view.seats.len() as u16 + u16::from(hosting) + watchers;
     let inner = dialog(frame, " Private room ", Color::Cyan, 60, height);
     let bold = Style::default().add_modifier(Modifier::BOLD);
     let mut lines = vec![Line::default()];
-    if let Some(code) = &view.code {
+    // The code lets people in, so only those seated see it, not friends
+    // watching one of them.
+    if let Some(code) = view.code.as_ref().filter(|_| room.watching.is_none()) {
         lines.push(Line::from(vec![
             Span::styled("Code ", dim()),
             Span::styled(code.clone(), bold.fg(Color::LightYellow)),
         ]));
         lines.push(Line::from("Share it so friends can join.").style(dim()));
     }
-    // The game's settings, then how full the room is.
-    let mut about = ui.lobby_line(room);
-    let players = format!("{}/{} players", view.seats.len(), view.max_players);
-    if about.is_empty() {
-        about.push(Span::styled(players, dim()));
-    } else {
-        about.push(Span::styled(format!(" · {players}"), dim()));
+    // The game's settings, then how full the room is, on a line of its own
+    // so a long settings line never hides it.
+    let about = ui.lobby_line(room);
+    if !about.is_empty() {
+        lines.push(Line::from(about));
     }
-    lines.push(Line::from(about));
+    let players = format!("{}/{} players", view.seats.len(), view.max_players);
+    lines.push(Line::styled(players, dim()));
     lines.push(Line::default());
     for seat in &view.seats {
         let (mark, style) = if seat.ready {
@@ -110,6 +111,7 @@ fn draw_lobby(
     let mut keys = Vec::new();
     match &room.watching {
         Some(friend) => keys.push(format!("Watching {friend}")),
+        None if room.my_seat().is_some_and(|s| s.ready) => keys.push("Enter not ready".to_string()),
         None => keys.push("Enter ready".to_string()),
     }
     keys.extend(ui.lobby_keys().map(str::to_string));
@@ -189,6 +191,12 @@ fn draw_results(frame: &mut Frame, ui: &dyn GameUi, room: &InRoom, next_in: Opti
     lines.push(Line::default());
     lines.push(match (view.kind, next_in) {
         _ if room.watching.is_some() => Line::styled("Esc leave", dim()),
+        // As Enter does: the same bots again only where the game keeps its
+        // choice of pool.
+        (RoomKind::Match, _) if room.against_bots() && ui.again_in_same_pool() => Line::styled(
+            format!("Enter play the {} again · Esc home", ui.bot_words().them),
+            dim(),
+        ),
         (RoomKind::Match, _) => Line::styled("Enter find another match · Esc home", dim()),
         (RoomKind::Private, Some(left)) => {
             Line::styled(format!("Next round in {} s · Esc leave", secs(left)), dim())

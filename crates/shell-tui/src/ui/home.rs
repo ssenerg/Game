@@ -22,11 +22,11 @@ pub fn draw(frame: &mut Frame, app: &App, selected: usize) {
     let rect = centered_rect(list_area, 44, items.len() as u16 + 4);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(super::dim());
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = super::dim();
     let mut lines = vec![Line::default()];
     for (i, item) in items.iter().enumerate() {
         let active = i == selected;

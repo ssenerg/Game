@@ -17,15 +17,30 @@ const PAD_X: u16 = 2;
 const PAD_Y: u16 = 1;
 
 /// Terminal size a `width`×`height` board needs: two columns per cell, plus
-/// border and padding.
-fn board_size(width: u16, height: u16) -> (u16, u16) {
-    (width * 2 + 2 + 2 * PAD_X, height + 2 + 2 * PAD_Y)
+/// its border and `pad` around it.
+fn board_size(width: u16, height: u16, pad: (u16, u16)) -> (u16, u16) {
+    (width * 2 + 2 + 2 * pad.0, height + 2 + 2 * pad.1)
+}
+
+/// The padding around the board that `size` has room for: none, on a side
+/// where the board only just fits.
+fn padding(width: u16, height: u16, size: Size) -> (u16, u16) {
+    let (full_w, full_h) = board_size(width, height, (PAD_X, PAD_Y));
+    (
+        if size.width >= full_w { PAD_X } else { 0 },
+        if size.height >= full_h { PAD_Y } else { 0 },
+    )
 }
 
 /// Whether the board is drawn at all; below this size only a warning is shown.
 pub fn board_fits(width: u16, height: u16, size: Size) -> bool {
-    let (need_w, need_h) = board_size(width, height);
+    let (need_w, need_h) = board_needs(width, height);
     size.width >= need_w && size.height >= need_h
+}
+
+/// The smallest terminal a `width`×`height` board is drawn on.
+pub fn board_needs(width: u16, height: u16) -> (u16, u16) {
+    board_size(width, height, (0, 0))
 }
 
 /// Draws the game. `releases` says whether the player's terminal says when
@@ -35,7 +50,8 @@ pub fn draw(frame: &mut Frame, app: &SnakeUi, releases: bool) {
     let area = frame.area();
 
     let (width, height) = (game.world.width, game.world.height);
-    let (need_w, need_h) = board_size(width, height);
+    let pad = padding(width, height, area.as_size());
+    let (need_w, need_h) = board_size(width, height, pad);
     if !board_fits(width, height, area.as_size()) {
         frame.render_widget(
             Paragraph::new(format!(
@@ -61,7 +77,7 @@ pub fn draw(frame: &mut Frame, app: &SnakeUi, releases: bool) {
     let block = Block::bordered()
         .border_type(BorderType::Double)
         .border_style(Style::default().fg(border))
-        .padding(Padding::new(PAD_X, PAD_X, PAD_Y, PAD_Y))
+        .padding(Padding::new(pad.0, pad.0, pad.1, pad.1))
         .title_top(title_line())
         .title_top(stats_line(app, game, need_w).right_aligned())
         .title_bottom(hint_line(app, game, me, releases).centered());
@@ -80,7 +96,7 @@ pub fn draw(frame: &mut Frame, app: &SnakeUi, releases: bool) {
 /// them, with its number on its head.
 fn looks(app: &SnakeUi, game: &SoloGame) -> Vec<SnakeLook> {
     let theme = &app.cfg.theme;
-    let others = opponent_colors(theme);
+    let others = opponent_colors(theme, game.rules().guns);
     let mut looks = vec![SnakeLook {
         head: theme_color(theme, ColorSlot::Head),
         body: theme_color(theme, ColorSlot::Body),
@@ -108,7 +124,7 @@ fn title_line() -> Line<'static> {
 }
 
 fn stats_line(app: &SnakeUi, game: &SoloGame, board_w: u16) -> Line<'static> {
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = shell_tui::ui::dim();
     let bold = Style::default().add_modifier(Modifier::BOLD);
     let len = game.len();
     let record = app.record.max(len as u32);
@@ -173,9 +189,6 @@ fn hint_line(
                 .add_modifier(Modifier::BOLD),
         )
     } else {
-        Line::styled(
-            " ←↑↓→ move · Esc pause ",
-            Style::default().fg(Color::DarkGray),
-        )
+        Line::styled(" ←↑↓→ move · Esc pause ", shell_tui::ui::dim())
     }
 }

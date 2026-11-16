@@ -121,15 +121,16 @@ pub fn rgb(color: Color) -> [u8; 3] {
 }
 
 /// A square's size in pixels: `cells` of `cell` pixels each, no wider than
-/// [`MAX_WIDTH`].
+/// [`MAX_WIDTH`], nor more than twice as tall as wide.
 pub fn pixels(cells: (u16, u16), cell: (u16, u16)) -> (u32, u32) {
     let w = u32::from(cells.0) * u32::from(cell.0.max(1));
     let h = u32::from(cells.1) * u32::from(cell.1.max(1));
-    if w <= MAX_WIDTH {
+    let (w, h) = if w <= MAX_WIDTH {
         (w.max(1), h.max(1))
     } else {
         (MAX_WIDTH, (h * MAX_WIDTH / w).max(1))
-    }
+    };
+    (w, h.min(2 * w))
 }
 
 /// What a picture shows, besides the square's color and size: a piece, or
@@ -286,5 +287,6 @@ mod tests {
         assert_eq!(rgb(Color::Rgb(1, 2, 3)), [1, 2, 3]);
         assert_eq!(pixels((5, 2), (8, 16)), (40, 32));
         assert_eq!(pixels((10, 4), (20, 40)), (160, 128), "no wider than 160");
+        assert_eq!(pixels((5, 2), (4, 4000)), (20, 40), "nor too tall");
     }
 }

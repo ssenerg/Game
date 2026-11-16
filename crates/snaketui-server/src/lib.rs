@@ -55,9 +55,6 @@ use crate::proxy::Trusted;
 use crate::room::{Drain, LocalRooms, RoomHandle, RoomHost, RoomRef, ServerId};
 use crate::store::Store;
 
-/// Threads that run rooms, the lobby and the matchmaker.
-const ROOM_THREADS: usize = 2;
-
 /// What every session can reach.
 pub struct Shared {
     pub cfg: ServerConfig,
@@ -113,6 +110,12 @@ pub enum Stopping {
 
 /// How long sessions get to say goodbye when the server stops.
 const GOODBYE: Duration = Duration::from_secs(3);
+/// Guests who saved nothing are forgotten after this many days away; all
+/// guests after [`GUESTS_GONE_DAYS`].
+const GUESTS_QUIET_DAYS: i64 = 30;
+const GUESTS_GONE_DAYS: i64 = 365;
+/// How long a stopping server waits for the saves that were under way.
+const WRITES_WAIT: Duration = Duration::from_secs(10);
 
 /// Serves players on `listener` until `stop` completes. Must run inside an
 /// actix `System`.
@@ -125,7 +128,7 @@ pub async fn serve(
 ) -> Result<()> {
     let store = Store::open(&cfg.database).await?;
     let limits = Limits::new(cfg.max_sessions, cfg.max_sessions_per_ip);
-    let room_arbiters: Vec<Arbiter> = (0..ROOM_THREADS).map(|_| Arbiter::new()).collect();
+    let room_arbiters: Vec<Arbiter> = (0..cfg.room_threads()).map(|_| Arbiter::new()).collect();
     let rooms = LocalRooms::default();
     let (server, cluster) = match &cfg.cluster {
         Some(cluster) => {
@@ -195,12 +198,20 @@ pub async fn serve(
     // Forget old wrong guesses now and then, so the limits' tables stay
     // small.
     let tidying = actix_rt::spawn({
-        let guesses = shared.guesses.clone();
+        let (guesses, store) = (shared.guesses.clone(), shared.store.clone());
         async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(600)).await;
-                if let Err(e) = guesses.tidy(store::now()).await {
+                let now = store::now();
+                if let Err(e) = guesses.tidy(now).await {
                     warn!(error = %e, "couldn't tidy the guessing limits");
+                }
+                let days = |n: i64| now - n * 24 * 60 * 60;
+                if let Err(e) = store
+                    .tidy_guests(days(GUESTS_QUIET_DAYS), days(GUESTS_GONE_DAYS))
+                    .await
+                {
+                    warn!(error = %e, "couldn't tidy old guests");
                 }
             }
         }
@@ -264,6 +275,10 @@ pub async fn serve(
     }
     if let Some(answering) = answering {
         answering.abort();
+    }
+    // Saves the goodbyes started run on the arbiters: they finish first.
+    if !shared.store.writes_done(WRITES_WAIT).await {
+        warn!("stopping with saves still unfinished");
     }
     for arbiter in arbiters.into_iter().chain(room_arbiters) {
         arbiter.stop();

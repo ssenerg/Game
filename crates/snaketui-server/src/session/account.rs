@@ -232,7 +232,7 @@ impl SessionActor {
                 session: self.id,
             });
             let store = self.shared.store.clone();
-            actix::spawn(async move {
+            self.shared.store.spawn_write(async move {
                 let _ = store.touch(account).await;
             });
         }
@@ -334,7 +334,7 @@ impl SessionActor {
             }
             let found = store.find_account(&username).await?;
             let (account, hash) = found.map_or((None, None), |(a, h)| (Some(a), Some(h)));
-            let right = hasher.verify(password.into_inner(), hash).await;
+            let right = hasher.verify(password.into_inner(), hash).await?;
             let Some(account) = account.filter(|_| right) else {
                 guesses.failed(&username, ip, now()).await?;
                 return Ok(SignedIn::Wrong);
@@ -437,29 +437,55 @@ impl SessionActor {
         }));
     }
 
-    pub(super) fn change_password(&mut self, password: Secret, ctx: &mut Context<Self>) {
+    /// Changes the account's password, given the one it has now, which is
+    /// checked as a sign-in would be. Other machines remembered for the
+    /// account are forgotten: whoever had them needs the new password.
+    pub(super) fn change_password(
+        &mut self,
+        current: Secret,
+        password: Secret,
+        ctx: &mut Context<Self>,
+    ) {
         let Some(account) = self.account.as_ref() else {
             return;
         };
         if let Err(why) = auth::check_password(&account.username, password.expose()) {
             return self.form_failed(why, ctx);
         }
-        let (store, hasher, id) = (
+        let (store, hasher, guesses) = (
             self.shared.store.clone(),
             self.shared.hasher.clone(),
-            account.id,
+            self.shared.guesses.clone(),
         );
+        let (id, username) = (account.id, account.username.clone());
+        let (ip, keep) = (self.peer.ip(), self.fingerprint());
         let changed = async move {
+            let _attempt = match guesses.begin(&username, ip) {
+                Ok(attempt) => attempt,
+                Err(refused) => return anyhow::Ok(Err(refused.message())),
+            };
+            if let Err(refused) = guesses.may_sign_in(&username, ip, now()).await? {
+                return Ok(Err(refused.message()));
+            }
+            let hash = store.find_account(&username).await?.map(|(_, hash)| hash);
+            if !hasher.verify(current.into_inner(), hash).await? {
+                guesses.failed(&username, ip, now()).await?;
+                return Ok(Err("That's not your current password."));
+            }
+            guesses.succeeded(&username).await?;
             let hash = hasher.hash(password.into_inner()).await?;
-            store.set_password(id, &hash).await
+            store.set_password(id, &hash).await?;
+            store.forget_keys_but(id, keep.as_deref()).await?;
+            Ok(Ok(()))
         };
         ctx.spawn(changed.into_actor(self).map(|changed, act, ctx| {
             match changed {
-                Ok(()) => {
+                Ok(Ok(())) => {
                     if let Some(app) = act.app.as_mut() {
                         app.password_changed();
                     }
                 }
+                Ok(Err(why)) => return act.form_failed(why, ctx),
                 Err(e) => {
                     warn!(error = %e, "couldn't change a password");
                     return act.form_failed(TRY_AGAIN, ctx);
@@ -605,7 +631,10 @@ impl SessionActor {
                 Ok(board) => board,
                 Err(e) => {
                     warn!(error = %e, "couldn't load the leaderboard");
-                    return act.notify(TRY_AGAIN.to_string(), ctx);
+                    if let Some(app) = act.app.as_mut() {
+                        app.leaderboard_failed();
+                    }
+                    return act.render(ctx);
                 }
             };
             let rows: Vec<LeaderRow> = best
@@ -697,6 +726,7 @@ impl SessionActor {
                 Requested::AlreadyFriends => format!("You're already friends with {who}."),
                 Requested::AlreadyAsked => format!("You already asked {who}."),
                 Requested::TooMany => "You have too many friends or open requests.".to_string(),
+                Requested::TheirsFull => format!("{who} has too many requests waiting."),
             })
         };
         ctx.spawn(asked.into_actor(self).map(|said, act, ctx| {

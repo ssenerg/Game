@@ -157,7 +157,7 @@ pub fn draw(
     let (w, h) = square;
     let (light, dark) = squares(prefs.board);
     let left = at.0 + if prefs.coordinates { 2 } else { 0 };
-    let label = Style::default().fg(Color::DarkGray);
+    let label = shell_tui::ui::dim();
     let pictures = extras
         .pictures
         .filter(|_| prefs.images && w >= PICTURED.0 && h >= PICTURED.1);

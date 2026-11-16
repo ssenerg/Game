@@ -18,7 +18,7 @@ pub fn draw_input(frame: &mut Frame, app: &App, field: Field) {
         Field::FriendName => (" Add a friend ", "Their username"),
     };
     let inner = dialog(frame, title, Color::Cyan, 44, 9);
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = super::dim();
     let mut lines = vec![
         Line::default(),
         Line::from(prompt).style(dim),
@@ -74,18 +74,20 @@ pub fn draw_finding(frame: &mut Frame, app: &App) {
         let them = app.ui().bot_words().them;
         lines.push(Line::from(format!("Nobody yet? Play {them} now, unrated.")));
         lines.push(Line::default());
-        lines.push(
-            Line::from(format!("b play {them} · Esc cancel"))
-                .style(Style::default().fg(Color::DarkGray)),
-        );
+        lines.push(Line::from(format!("b play {them} · Esc cancel")).style(super::dim()));
     } else {
-        lines.push(Line::from("Esc cancel").style(Style::default().fg(Color::DarkGray)));
+        lines.push(Line::from("Esc cancel").style(super::dim()));
     }
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
 }
 
 pub fn draw_joining(frame: &mut Frame) {
-    let inner = dialog(frame, " Joining ", Color::Cyan, 30, 5);
-    let lines = vec![Line::default(), Line::from("One moment…")];
+    let inner = dialog(frame, " Joining ", Color::Cyan, 30, 6);
+    let lines = vec![
+        Line::default(),
+        Line::from("One moment…"),
+        Line::default(),
+        Line::from("Esc cancel").style(super::dim()),
+    ];
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
 }

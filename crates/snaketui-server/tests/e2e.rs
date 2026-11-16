@@ -38,6 +38,9 @@ async fn quitting_logs_out_at_once_and_restores_the_screen() {
     p.send(b"q").await;
     p.wait_for("Quick play").await;
 
+    // Home asks first.
+    p.send(b"q").await;
+    p.wait_for("Press q again to quit.").await;
     let quit = Instant::now();
     p.send(b"q").await;
     assert_eq!(p.wait_closed(Duration::from_secs(2)).await, Some(0));
@@ -125,6 +128,27 @@ async fn commands_subsystems_and_shells_without_a_terminal_are_refused() {
         }
     }
     assert!(refused, "sftp must be refused");
+}
+
+#[tokio::test]
+async fn slow_key_exchanges_are_refused() {
+    use std::borrow::Cow;
+
+    use russh::{Preferred, kex};
+
+    let server = TestServer::start();
+    let config = client::Config {
+        preferred: Preferred {
+            kex: Cow::Borrowed(&[kex::DH_G18_SHA512, kex::EXTENSION_SUPPORT_AS_CLIENT]),
+            ..Preferred::DEFAULT
+        },
+        ..client::Config::default()
+    };
+    let slow = client::connect(Arc::new(config), server.addr, TrustAnyHost).await;
+    assert!(slow.is_err(), "a finite-field exchange was agreed");
+    // The usual exchange works.
+    let mut client = connect(server.addr).await;
+    assert!(sign_in(&mut client, Login::Guest).await);
 }
 
 #[tokio::test]

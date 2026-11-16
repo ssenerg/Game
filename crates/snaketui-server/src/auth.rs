@@ -49,7 +49,12 @@ pub fn check_username(name: &str) -> Result<(), &'static str> {
         return Err("Usernames use letters, digits, _ and - only.");
     }
     let lower = name.to_ascii_lowercase();
-    let bot = bot_names().iter().any(|b| b.eq_ignore_ascii_case(&lower));
+    // Every game's bots: Snake's snakes, and chess's computer.
+    let bot = bot_names()
+        .iter()
+        .chain(<chess_core::round::Chess as game_api::Game>::BOT_NAMES)
+        .chain(&["bot", "bots"])
+        .any(|b| b.eq_ignore_ascii_case(&lower));
     if GENERIC_USERS.contains(&lower.as_str()) || RESERVED.contains(&lower.as_str()) || bot {
         return Err("That username is reserved. Pick another.");
     }
@@ -83,6 +88,9 @@ pub struct Hasher {
 
 /// Password checks running at once.
 const AT_ONCE: usize = 4;
+/// How long a check waits its turn before the player is asked to try
+/// again, so a flood of checks can't keep everyone else waiting.
+const TURN_WAIT: Duration = Duration::from_secs(5);
 
 impl Hasher {
     pub fn new() -> Result<Self> {
@@ -96,8 +104,16 @@ impl Hasher {
         })
     }
 
+    /// Waits for a turn to hash or check a password.
+    async fn turn(&self) -> Result<tokio::sync::SemaphorePermit<'_>> {
+        tokio::time::timeout(TURN_WAIT, self.permits.acquire())
+            .await
+            .map_err(|_| anyhow!("too many password checks waiting"))?
+            .map_err(Into::into)
+    }
+
     pub async fn hash(&self, password: Zeroizing<String>) -> Result<String> {
-        let _permit = self.permits.acquire().await?;
+        let _permit = self.turn().await?;
         tokio::task::spawn_blocking(move || {
             Argon2::default()
                 .hash_password(password.as_bytes())
@@ -108,11 +124,9 @@ impl Hasher {
     }
 
     /// Whether `password` matches `hash`. With no hash, checks the decoy and
-    /// says no.
-    pub async fn verify(&self, password: Zeroizing<String>, hash: Option<String>) -> bool {
-        let Ok(_permit) = self.permits.acquire().await else {
-            return false;
-        };
+    /// says no. An error when it couldn't check, which isn't a wrong guess.
+    pub async fn verify(&self, password: Zeroizing<String>, hash: Option<String>) -> Result<bool> {
+        let _permit = self.turn().await?;
         let real = hash.is_some();
         let hash = hash.unwrap_or_else(|| self.decoy.to_string());
         let checked = tokio::task::spawn_blocking(move || {
@@ -123,7 +137,7 @@ impl Hasher {
             })
         })
         .await;
-        real && checked.unwrap_or(false)
+        Ok(real && checked.unwrap_or(false))
     }
 }
 
@@ -465,6 +479,8 @@ mod tests {
         assert!(check_username("moderator").is_err());
         assert!(check_username("viper").is_err(), "a bot's name");
         assert!(check_username("PYTHON").is_err(), "a bot's name");
+        assert!(check_username("Computer").is_err(), "chess's bot");
+        assert!(check_username("bot").is_err());
     }
 
     #[test]
@@ -486,9 +502,20 @@ mod tests {
             hasher
                 .verify(secret("correct horse"), Some(hash.clone()))
                 .await
+                .unwrap()
         );
-        assert!(!hasher.verify(secret("wrong horse"), Some(hash)).await);
-        assert!(!hasher.verify(secret("not anyone's password"), None).await);
+        assert!(
+            !hasher
+                .verify(secret("wrong horse"), Some(hash))
+                .await
+                .unwrap()
+        );
+        assert!(
+            !hasher
+                .verify(secret("not anyone's password"), None)
+                .await
+                .unwrap()
+        );
     }
 
     fn ip(last: u8) -> IpAddr {

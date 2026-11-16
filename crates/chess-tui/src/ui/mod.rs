@@ -151,7 +151,7 @@ fn framed(frame: &mut Frame, area: Rect, title: &str, width: u16, rows: u16) -> 
     };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::DarkGray))
+        .border_style(shell_tui::ui::dim())
         .title(title.to_string())
         .title_style(
             Style::default()

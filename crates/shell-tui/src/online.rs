@@ -6,7 +6,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use game_api::{AnyView, GameId, PlayerId, RatingKey, SeatView, ShellView};
+use game_api::{AnyView, GameId, PlayerId, RatingKey, RoomKind, SeatView, ShellView, is_bot};
 use zeroize::{Zeroize, Zeroizing};
 
 /// Longest password, in characters; they're all ASCII.
@@ -146,6 +146,8 @@ pub enum FormKind {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FormRow {
     Username,
+    /// The password the account has now, to change it.
+    Current,
     Password,
     Repeat,
     Remember,
@@ -169,7 +171,7 @@ impl FormKind {
                 vec![FormRow::Username, FormRow::Password, FormRow::Remember]
             }
             FormKind::SignIn => vec![FormRow::Username, FormRow::Password],
-            FormKind::ChangePassword => vec![FormRow::Password, FormRow::Repeat],
+            FormKind::ChangePassword => vec![FormRow::Current, FormRow::Password, FormRow::Repeat],
         }
     }
 }
@@ -177,6 +179,7 @@ impl FormKind {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Form {
     pub username: String,
+    pub current: Secret,
     pub password: Secret,
     pub repeat: Secret,
     pub remember: bool,
@@ -363,6 +366,8 @@ pub struct Online {
     pub friends: FriendsView,
     /// `None` until it loads.
     pub leaderboard: Option<LeaderboardView>,
+    /// The leaderboard last asked for couldn't load.
+    pub leaderboard_failed: bool,
     /// Who's inviting this player to their room, waiting for Enter or Esc.
     pub invite: Option<Invite>,
     /// Friend requests waiting for this player's answer.
@@ -370,8 +375,11 @@ pub struct Online {
     /// Quick play was chosen once on a terminal too small for its matches;
     /// choosing it again queues anyway.
     pub(crate) confirm_small: bool,
-    /// x was pressed once on this friend; a second x removes them.
+    /// x was pressed once on this friend, request or remembered machine; a
+    /// second x removes, declines or forgets it.
     pub confirm_remove: Option<String>,
+    /// q was pressed once on the home menu; a second q quits.
+    pub(crate) confirm_quit: bool,
     /// The friends list was opened from a private room's lobby.
     pub(crate) friends_from_room: bool,
 }
@@ -391,9 +399,11 @@ impl Online {
             keys: Vec::new(),
             friends: FriendsView::default(),
             leaderboard: None,
+            leaderboard_failed: false,
             invite: None,
             requests: 0,
             confirm_small: false,
+            confirm_quit: false,
             confirm_remove: None,
             friends_from_room: false,
         }
@@ -429,6 +439,17 @@ impl InRoom {
 
     pub fn my_seat(&self) -> Option<&SeatView> {
         self.shell().seat(self.me)
+    }
+
+    /// Whether it's a match against bots: everyone else in it is one.
+    pub fn against_bots(&self) -> bool {
+        let shell = self.shell();
+        let mut others = shell
+            .seats
+            .iter()
+            .filter(|s| s.who.id != self.me)
+            .peekable();
+        shell.kind == RoomKind::Match && others.peek().is_some() && others.all(|s| is_bot(s.who.id))
     }
 
     /// The seat this player's screen follows: their own, or the friend's

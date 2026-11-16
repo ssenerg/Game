@@ -10,6 +10,7 @@ use shell_tui::ui::dialog;
 use snake_core::round::quick_rules;
 use snake_core::solo::GameOverReason;
 
+use super::game::{board_fits, board_needs};
 use super::room::{room_fits, room_size};
 use crate::app::{QUICK_POOLS, SnakeUi};
 
@@ -24,7 +25,7 @@ pub fn draw_quick_play(frame: &mut Frame, app: &SnakeUi, selected: usize) {
         48,
         8 + 2 * u16::from(too_small),
     );
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = shell_tui::ui::dim();
     let mut lines = vec![Line::default()];
     for (i, (_, name, about)) in QUICK_POOLS.iter().enumerate() {
         let (mark, style) = if i == selected {
@@ -39,7 +40,7 @@ pub fn draw_quick_play(frame: &mut Frame, app: &SnakeUi, selected: usize) {
         };
         lines.push(Line::from(vec![
             Span::styled(format!("{mark}{name:<9}"), style),
-            Span::styled(format!("{about:<31}"), dim),
+            Span::styled(format!("{about:<33}"), dim),
         ]));
     }
     lines.push(Line::default());
@@ -61,8 +62,23 @@ pub fn draw_quick_play(frame: &mut Frame, app: &SnakeUi, selected: usize) {
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
 }
 
-pub fn draw_pause(frame: &mut Frame, selected: usize) {
-    let inner = dialog(frame, " PAUSED ", Color::Yellow, 36, 8);
+/// Single player, paused; on a terminal too small for the board, it says
+/// so, since the game won't resume until it's bigger.
+pub fn draw_pause(frame: &mut Frame, app: &SnakeUi, selected: usize) {
+    let size = frame.area().as_size();
+    let needs = app
+        .game
+        .as_ref()
+        .map(|g| (g.world.width, g.world.height))
+        .filter(|&(w, h)| !board_fits(w, h, size))
+        .map(|(w, h)| board_needs(w, h));
+    let inner = dialog(
+        frame,
+        " PAUSED ",
+        Color::Yellow,
+        36,
+        8 + u16::from(needs.is_some()),
+    );
 
     let item = |label: &str, active: bool| {
         if active {
@@ -75,13 +91,19 @@ pub fn draw_pause(frame: &mut Frame, selected: usize) {
             Line::from(format!("  {label}"))
         }
     };
-    let lines = vec![
+    let mut lines = vec![
         Line::default(),
         item("Resume", selected == 0),
         item("Quit to menu", selected == 1),
         Line::default(),
-        Line::from("↑↓ + Enter · Esc resume · q menu").style(Style::default().fg(Color::DarkGray)),
     ];
+    if let Some((w, h)) = needs {
+        lines.push(Line::styled(
+            format!("Needs a {w}×{h} terminal to resume"),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+    lines.push(Line::from("↑↓ + Enter · Esc resume · q menu").style(shell_tui::ui::dim()));
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
 }
 
@@ -91,7 +113,7 @@ pub fn draw_game_over(frame: &mut Frame, app: &SnakeUi, new_record: bool) {
         Some(GameOverReason::HitWall) => ("You crashed into a wall!", Color::LightRed),
         Some(GameOverReason::HitSelf) => ("You bit yourself!", Color::LightRed),
         Some(GameOverReason::HitBot) => ("You crashed into a bot!", Color::LightRed),
-        Some(GameOverReason::Shot) => ("A bot shot you!", Color::LightRed),
+        Some(GameOverReason::Shot) => ("A bot's shot or blast got you!", Color::LightRed),
         Some(GameOverReason::Poisoned) => ("✖ You ate poison!", Color::LightMagenta),
         Some(GameOverReason::MaxLength) => ("★ Board complete — you win! ★", Color::LightGreen),
         Some(GameOverReason::BeatBots) => ("★ You outlasted every bot! ★", Color::LightGreen),
@@ -107,7 +129,7 @@ pub fn draw_game_over(frame: &mut Frame, app: &SnakeUi, new_record: bool) {
     };
     let inner = dialog(frame, title, color, 46, 11);
 
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = shell_tui::ui::dim();
     let secs = game.clock().as_secs();
     let mut lines = vec![
         Line::default(),
@@ -131,6 +153,6 @@ pub fn draw_game_over(frame: &mut Frame, app: &SnakeUi, new_record: bool) {
         );
     }
     lines.push(Line::default());
-    lines.push(Line::from("r play again · Enter menu · q quit").style(dim));
+    lines.push(Line::from("r play again · Enter menu · q home").style(dim));
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
 }

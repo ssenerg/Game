@@ -26,6 +26,10 @@ database = "sqlite:///var/lib/snaketui/snaketui.db"
 # Threads serving sessions; 0 means one per CPU core.
 workers = 0
 
+# Threads running rooms, the lobby and the matchmaker; 0 means one for
+# every two CPU cores, and at least two.
+room_threads = 0
+
 # Connections at once, in total and from a single IP address.
 max_sessions = 2000
 max_sessions_per_ip = 10

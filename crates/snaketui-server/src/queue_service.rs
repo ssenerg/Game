@@ -28,13 +28,18 @@ use crate::cluster::{HEARTBEAT, PEER_TIMEOUT, nats_options, prefix};
 use crate::config::ClusterConfig;
 use crate::games::PoolKey;
 use crate::matcher::{Pools, Ticket, Waiting};
+use crate::matchmaker::RESEND_EVERY;
 use crate::room::{RoomRef, ServerId};
 
 /// How often the queue looks for matches.
 const RUN_EVERY: Duration = Duration::from_millis(250);
-/// Players matched this recently are ignored if their server sends them
-/// again before it has heard of the match.
+/// A ticket for a player matched this recently, waiting since before the
+/// match, is a resend from a server that hasn't heard of it yet, and is
+/// ignored.
 const RECENTLY: Duration = Duration::from_secs(30);
+/// A ticket its server hasn't sent again for this long is for someone no
+/// longer waiting, whose leaving went missing.
+const STALE: Duration = Duration::from_secs(4 * RESEND_EVERY.as_secs());
 /// Servers asked to host one match, at most, before its players go back
 /// in the queue.
 const HOST_TRIES: usize = 3;
@@ -72,6 +77,8 @@ pub struct Queue {
     /// Each waiting player's ticket, and when they joined on the queue's
     /// clock.
     tickets: HashMap<PlayerId, (QueueTicket, Duration)>,
+    /// When each waiting player's ticket last came.
+    heard: HashMap<PlayerId, Instant>,
     servers: HashMap<ServerId, ServerSeen>,
     recently: HashMap<PlayerId, Instant>,
     started: Instant,
@@ -84,6 +91,7 @@ impl Queue {
         Self {
             matcher: Pools::default(),
             tickets: HashMap::new(),
+            heard: HashMap::new(),
             servers: HashMap::new(),
             recently: HashMap::new(),
             started: Instant::now(),
@@ -109,15 +117,16 @@ impl Queue {
         self.matcher.is_empty()
     }
 
-    /// Queues a player, or updates them if they're already queued.
+    /// Queues a player, or updates them if they're already queued. A
+    /// player back in the queue after a quick match is queued again.
     pub fn add(&mut self, ticket: QueueTicket) {
         let player = ticket.who.id;
-        if self
-            .recently
-            .get(&player)
-            .is_some_and(|at| at.elapsed() < RECENTLY)
-        {
-            return;
+        if let Some(at) = self.recently.get(&player) {
+            let since = at.elapsed();
+            if since < RECENTLY && ticket.waited >= since {
+                return;
+            }
+            self.recently.remove(&player);
         }
         let since = self.now().saturating_sub(ticket.waited.mul_f64(self.speed));
         self.queue(ticket, since);
@@ -135,15 +144,17 @@ impl Queue {
         );
         // A pool of a game this queue doesn't know waits for nobody.
         if queued {
+            self.heard.insert(ticket.who.id, Instant::now());
             self.tickets.insert(ticket.who.id, (ticket, since));
         } else {
-            self.tickets.remove(&ticket.who.id);
+            self.remove(ticket.who.id);
         }
     }
 
     pub fn remove(&mut self, player: PlayerId) {
         self.matcher.remove(player);
         self.tickets.remove(&player);
+        self.heard.remove(&player);
     }
 
     pub fn heard(&mut self, alive: Alive) {
@@ -178,6 +189,15 @@ impl Queue {
                 self.remove(player);
             }
         }
+        let stale: Vec<PlayerId> = self
+            .heard
+            .iter()
+            .filter(|(_, at)| at.elapsed() > STALE)
+            .map(|(&player, _)| player)
+            .collect();
+        for player in stale {
+            self.remove(player);
+        }
         self.recently.retain(|_, at| at.elapsed() < RECENTLY);
         let now = self.now();
         let mut plans = Vec::new();
@@ -185,7 +205,10 @@ impl Queue {
             let back: Vec<(QueueTicket, Duration)> = group
                 .players
                 .iter()
-                .filter_map(|p| self.tickets.remove(p))
+                .filter_map(|p| {
+                    self.heard.remove(p);
+                    self.tickets.remove(p)
+                })
                 .collect();
             let seats: Vec<MatchSeat> = back
                 .iter()
@@ -426,6 +449,33 @@ mod tests {
         queue.unplanned(plans.into_iter().next().unwrap());
         assert_eq!(queue.len(), 2);
         assert_eq!(queue.run().len(), 1);
+    }
+
+    #[test]
+    fn a_player_back_from_a_quick_match_is_queued_again() {
+        let mut queue = Queue::new(1.0);
+        queue.heard(alive(1, "eu", 0));
+        // Matched 5 s ago.
+        queue
+            .recently
+            .insert(10, Instant::now() - Duration::from_secs(5));
+        queue.add(ticket(10, 1, "eu", 8));
+        assert!(queue.is_empty(), "a resend from before the match");
+        queue.add(ticket(10, 1, "eu", 1));
+        assert_eq!(queue.len(), 1, "back after it");
+    }
+
+    #[test]
+    fn a_ticket_its_server_stopped_sending_goes() {
+        let mut queue = Queue::new(1.0);
+        queue.heard(alive(1, "eu", 0));
+        queue.add(ticket(10, 1, "eu", 0));
+        queue.add(ticket(11, 1, "eu", 0));
+        queue
+            .heard
+            .insert(10, Instant::now() - STALE - Duration::from_secs(1));
+        queue.run();
+        assert_eq!(queue.len(), 1, "only the one still sent");
     }
 
     #[test]

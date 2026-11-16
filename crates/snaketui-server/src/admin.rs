@@ -21,18 +21,26 @@ use crate::{Shared, Stopping};
 /// A request has this long to arrive whole.
 const READ_LIMIT: Duration = Duration::from_secs(2);
 const MAX_REQUEST: usize = 4096;
+/// Requests answered at once; more wait to be accepted. Monitoring needs a
+/// few, and a flood of connections can't pile up tasks.
+const AT_ONCE: usize = 16;
 /// Bucket bounds for the tick-lag histogram, in seconds.
 const LAG_BOUNDS: [f64; 7] = [0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05];
 
 /// Answers until the task is dropped.
 pub async fn serve_admin(listener: TcpListener, shared: Arc<Shared>, limits: Arc<Limits>) {
+    let turns = Arc::new(tokio::sync::Semaphore::new(AT_ONCE));
     loop {
+        let Ok(turn) = Arc::clone(&turns).acquire_owned().await else {
+            return;
+        };
         let Ok((stream, peer)) = listener.accept().await else {
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         };
         let (shared, limits) = (Arc::clone(&shared), Arc::clone(&limits));
         tokio::spawn(async move {
+            let _turn = turn;
             if let Err(e) = answer(stream, &shared, &limits).await {
                 debug!(%peer, error = %e, "an admin request failed");
             }

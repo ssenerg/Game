@@ -132,8 +132,7 @@ impl World {
         world.corpses_to_food = true;
         world.scale_food = true;
         let rules = &world.rules;
-        world.next_gun = rules
-            .guns
+        world.next_gun = (rules.guns && rules.gun_interval_s > 0)
             .then(|| Duration::from_secs(rules.gun_interval_s));
         world.next_thrown = (rules.guns && rules.thrown_interval_s > 0)
             .then(|| Duration::from_secs(rules.thrown_interval_s));
@@ -201,8 +200,9 @@ impl World {
 
     /// Snake `id`'s `f`: it fires the gun it holds on the next step, or
     /// starts throwing the thrown item it holds, or, already throwing,
-    /// throws it where the mark is, as letting go of `f` does. Returns
-    /// whether it did any of these.
+    /// throws it where the mark is, as letting go of `f` does. A throw
+    /// let go lands before another can start. Returns whether it did any
+    /// of these.
     pub fn fire(&mut self, id: u8) -> bool {
         let Some(snake) = self.snakes.iter_mut().find(|s| s.id == id && s.alive()) else {
             return false;
@@ -214,6 +214,7 @@ impl World {
             return true;
         }
         match snake.held {
+            Some(held) if held.kind.thrown() && snake.throw.is_some() => return false,
             Some(held) if held.kind.thrown() => {
                 snake.held = None;
                 snake.throw = Some(Throw {
@@ -616,6 +617,15 @@ impl World {
     /// Whether smoke hides the cell at `p`.
     pub fn smoky(&self, p: Point) -> bool {
         self.smoke.iter().any(|c| c.cells.contains(&p))
+    }
+
+    /// Which cells smoke hides, row by row, for looking up many at once.
+    pub(crate) fn smoke_map(&self) -> Vec<bool> {
+        let mut map = vec![false; self.width as usize * self.height as usize];
+        for p in self.smoke.iter().flat_map(|c| &c.cells) {
+            map[p.y as usize * self.width as usize + p.x as usize] = true;
+        }
+        map
     }
 
     /// Moves a bullet up to the rules' bullet speed in cells, checking first the cell
@@ -1415,6 +1425,23 @@ mod tests {
         assert!(w.fire(0), "f again");
         w.step();
         assert_eq!(w.smoke.len(), 1);
+    }
+
+    #[test]
+    fn a_throw_let_go_lands_before_another_starts() {
+        let mut w = armed(WallMode::Full, &[(&[(5, 5), (4, 5)], Right)]);
+        throw(&mut w, 0, Smoke);
+        w.step();
+        // Let go, then f again at once, holding a grenade by now.
+        assert!(w.release(0));
+        w.snakes[0].held = Some(Held {
+            kind: Grenade,
+            until: w.clock + Duration::from_secs(5),
+        });
+        assert!(!w.fire(0), "the grenade waits");
+        w.step();
+        assert_eq!(w.smoke.len(), 1, "the smoke landed");
+        assert!(w.fire(0), "now the grenade goes");
     }
 
     #[test]
