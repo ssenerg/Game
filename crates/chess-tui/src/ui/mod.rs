@@ -8,7 +8,7 @@ mod round;
 use chess_core::control::{PRESET_NAMES, PRESETS};
 use chess_core::piece;
 use chess_core::position::Position;
-use chess_core::round::ChessSettings;
+use chess_core::round::{ChessSettings, LEVELS};
 use game_api::{GameId, RatingKey};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
@@ -122,9 +122,11 @@ pub(crate) fn draw(frame: &mut Frame, ui: &ChessUi, ctx: &Ctx) {
     match ui.screen {
         ChessScreen::Settings => draw_settings(frame, ui, ctx),
         ChessScreen::Challenge { selected } => draw_challenge(frame, ui, ctx, selected),
-        ChessScreen::Pairing { selected, against } => {
-            draw_pairing(frame, ui, ctx, selected, against)
-        }
+        ChessScreen::Pairing {
+            selected,
+            computer,
+            on_level,
+        } => draw_pairing(frame, ui, ctx, selected, computer.then_some(on_level)),
     }
 }
 
@@ -261,19 +263,18 @@ fn status(ctx: &Ctx, otherwise: Line<'static>) -> Line<'static> {
     }
 }
 
-/// Who quick pairing plays, in words.
-fn opponent(level: Option<u8>) -> String {
-    match level {
-        Some(level) => format!("the computer, level {level}"),
-        None => "a person".to_string(),
-    }
-}
-
-fn draw_pairing(frame: &mut Frame, ui: &ChessUi, ctx: &Ctx, selected: usize, against: bool) {
+/// The presets, on `selected`: quick pairing's, or the computer's, with its
+/// level's row below them, which the player is on if `level` says so.
+fn draw_pairing(frame: &mut Frame, ui: &ChessUi, ctx: &Ctx, selected: usize, level: Option<bool>) {
     let area = frame.area();
     let rows = pairing_rows();
     let speeds = rows.len() as u16;
-    let inner = framed(frame, area, " Quick pairing ", 48, speeds + 4);
+    let on_level = level == Some(true);
+    let (title, height) = match level {
+        Some(_) => (" Play the computer ", speeds + 4),
+        None => (" Quick pairing ", speeds + 2),
+    };
+    let inner = framed(frame, area, title, 48, height);
     let chosen = Style::default()
         .fg(Color::Yellow)
         .add_modifier(Modifier::BOLD);
@@ -289,7 +290,7 @@ fn draw_pairing(frame: &mut Frame, ui: &ChessUi, ctx: &Ctx, selected: usize, aga
         let mut spans = vec![Span::raw(format!(" {label:<10}"))];
         for i in presets.iter().copied() {
             let name = PRESET_NAMES[i];
-            spans.push(match (i == selected, against) {
+            spans.push(match (i == selected, on_level) {
                 (true, false) => Span::styled(format!("❯{name:<6}"), chosen),
                 // Still what Enter plays.
                 (true, true) => Span::styled(format!(" {name:<6}"), Color::Yellow),
@@ -301,7 +302,9 @@ fn draw_pairing(frame: &mut Frame, ui: &ChessUi, ctx: &Ctx, selected: usize, aga
             game: GameId::Chess,
             category: speed.name(),
         };
-        if let Some(rating) = ctx.account.and_then(|a| a.rating(key)) {
+        // Games with the computer leave ratings be.
+        let rating = ctx.account.filter(|_| level.is_none());
+        if let Some(rating) = rating.and_then(|a| a.rating(key)) {
             spans.push(Span::styled(
                 format!("{:>width$}", rating.text(), width = 45 - used.min(45)),
                 dim(),
@@ -309,26 +312,28 @@ fn draw_pairing(frame: &mut Frame, ui: &ChessUi, ctx: &Ctx, selected: usize, aga
         }
         lines.push(Line::from(spans));
     }
-    let who = opponent(ui.prefs.opponent());
-    let label = format!("{}Against   ", if against { "❯" } else { " " });
-    lines.push(Line::default());
-    lines.push(Line::from(if against {
-        vec![
-            Span::styled(label, chosen),
-            Span::styled(format!("◂ {who} ▸"), Color::LightYellow),
-        ]
-    } else {
-        vec![Span::raw(label), Span::styled(format!("  {who}"), dim())]
-    }));
-    let against_at = Rect::new(inner.x, inner.y + speeds + 2, inner.width, 1);
-    ui.hits.add(against_at.intersection(inner), Hit::Against);
+    if level.is_some() {
+        let value = format!("{} of {}", ui.prefs.challenge.level, LEVELS.end());
+        let label = format!("{}Level     ", if on_level { "❯" } else { " " });
+        lines.push(Line::default());
+        lines.push(Line::from(if on_level {
+            vec![
+                Span::styled(label, chosen),
+                Span::styled(format!("◂ {value} ▸"), Color::LightYellow),
+            ]
+        } else {
+            vec![Span::raw(label), Span::styled(format!("  {value}"), dim())]
+        }));
+        let level_at = Rect::new(inner.x, inner.y + speeds + 2, inner.width, 1);
+        ui.hits.add(level_at.intersection(inner), Hit::Level);
+    }
     lines.truncate(inner.height as usize);
     frame.render_widget(Paragraph::new(lines), inner);
     let control = PRESETS[selected.min(PRESETS.len() - 1)];
-    let rated = match (ui.prefs.computer, ctx.account.is_some()) {
-        (true, _) => "unrated",
-        (false, true) => "rated",
-        (false, false) => "unrated: sign in to be rated",
+    let rated = match (level, ctx.account.is_some()) {
+        (Some(_), _) => "unrated",
+        (None, true) => "rated",
+        (None, false) => "unrated: sign in to be rated",
     };
     let about = Line::styled(
         format!("{control} {} · sides drawn · {rated}", speed(control)),

@@ -215,16 +215,18 @@ fn settings_are_kept() {
         "~ann".into(),
         true,
     );
+    app.go_home(HomeItem::Game(1), None);
     let effects = app.handle(Key::Enter);
     assert_eq!(app.screen, Screen::Game);
     assert!(effects.is_empty());
+    assert_eq!(chess(&mut app).screen, ChessScreen::Settings);
     let effects = keys(&mut app, &[Key::Right]);
     let Some(Effect::Game(GameId::Chess, GameFx::SavePrefs(text))) = effects.first() else {
         panic!("saved: {effects:?}");
     };
     assert_eq!(Prefs::from_saved_text(text).board, BoardLook::Green);
     app.handle(Key::Esc);
-    assert!(matches!(app.screen, Screen::Home { .. }));
+    assert_eq!(home_at(&app), HomeItem::Game(1));
 }
 
 #[test]
@@ -243,15 +245,18 @@ fn quick_pairing_picks_a_preset_and_waits_in_its_pool() {
         chess(&mut app).screen,
         ChessScreen::Pairing {
             selected: 5,
-            against: false
+            computer: false,
+            on_level: false
         },
         "on 5+3 to begin with"
     );
     let screen = shown(&app, 80, 24);
+    assert!(screen.contains("Quick pairing"), "{screen}");
     assert!(
         screen.contains("5+3 blitz · sides drawn · unrated"),
         "{screen}"
     );
+    assert!(!screen.contains("Level"), "only people here: {screen}");
 
     // Up to bullet's 2+1, left to 1+0, right again, and play it.
     let effects = keys(&mut app, &[Key::Up, Key::Left, Key::Right, Key::Enter]);
@@ -282,7 +287,8 @@ fn quick_pairing_picks_a_preset_and_waits_in_its_pool() {
         chess(&mut app).screen,
         ChessScreen::Pairing {
             selected: 1,
-            against: false
+            computer: false,
+            on_level: false
         }
     );
     app.handle(Key::Esc);
@@ -306,11 +312,47 @@ fn pairing() -> App {
     app
 }
 
+/// Chess's "Play the computer", open on 5+3, as a guest.
+fn play_the_computer() -> App {
+    let mut app = App::online(
+        vec![Box::new(chess_tui::ChessUi::default())],
+        None,
+        "~ann".into(),
+        true,
+    );
+    app.resize(ratatui::layout::Size::new(80, 24));
+    let home = shown(&app, 80, 24);
+    assert!(home.contains("Play the computer"), "{home}");
+    app.go_home(HomeItem::Game(0), None);
+    app.handle(Key::Enter);
+    app
+}
+
+/// Where the home menu is.
+fn home_at(app: &App) -> HomeItem {
+    let Screen::Home { selected } = app.screen else {
+        panic!("{:?}", app.screen);
+    };
+    app.home_items()[selected]
+}
+
 #[test]
-fn pairing_plays_the_computer_at_the_level_chosen() {
-    let mut app = pairing();
-    assert!(shown(&app, 80, 24).contains("Against     a person"));
-    // Down past the presets to who to play, keeping the preset.
+fn play_the_computer_at_the_level_chosen() {
+    let mut app = play_the_computer();
+    assert_eq!(app.screen, Screen::Game);
+    assert_eq!(
+        chess(&mut app).screen,
+        ChessScreen::Pairing {
+            selected: 5,
+            computer: true,
+            on_level: false
+        }
+    );
+    let screen = shown(&app, 80, 24);
+    assert!(screen.contains(" Play the computer "), "{screen}");
+    assert!(screen.contains(" Level       3 of 5"), "{screen}");
+    assert!(screen.contains("sides drawn · unrated"), "{screen}");
+    // Down past the presets to the level, keeping the preset.
     let mut presets = Vec::new();
     for _ in 0..4 {
         app.handle(Key::Down);
@@ -318,7 +360,8 @@ fn pairing_plays_the_computer_at_the_level_chosen() {
     }
     let ChessScreen::Pairing {
         selected,
-        against: true,
+        computer: true,
+        on_level: true,
     } = chess(&mut app).screen
     else {
         panic!("{presets:?}");
@@ -326,52 +369,44 @@ fn pairing_plays_the_computer_at_the_level_chosen() {
     assert!(
         presets.contains(&ChessScreen::Pairing {
             selected,
-            against: false
+            computer: true,
+            on_level: false
         }),
         "the preset above stays chosen: {presets:?}"
     );
-    let effects = keys(&mut app, &[Key::Right, Key::Right, Key::Right]);
+    // Down to 1, where it stops.
+    let effects = keys(&mut app, &[Key::Left, Key::Left, Key::Left]);
+    assert_eq!(effects.len(), 2, "{effects:?}");
     let Some(Effect::Game(GameId::Chess, GameFx::SavePrefs(text))) = effects.last() else {
         panic!("saved: {effects:?}");
     };
-    let prefs = Prefs::from_saved_text(text);
-    assert_eq!((prefs.computer, prefs.challenge.level), (true, 3));
+    assert_eq!(Prefs::from_saved_text(text).challenge.level, 1);
     let screen = shown(&app, 80, 24);
-    assert!(
-        screen.contains("❯Against   ◂ the computer, level 3 ▸"),
-        "{screen}"
-    );
-    assert!(screen.contains("sides drawn · unrated"), "{screen}");
+    assert!(screen.contains("❯Level     ◂ 1 of 5 ▸"), "{screen}");
 
-    // A click turns it on a level; and Enter plays the preset, which a
-    // click on a preset does too.
-    click(&mut app, Hit::Against);
-    assert_eq!(chess(&mut app).prefs.challenge.level, 4);
+    // A click on the level turns it up; and Enter plays the preset, which
+    // a click on a preset does too.
+    click(&mut app, Hit::Level);
+    assert_eq!(chess(&mut app).prefs.challenge.level, 2);
     let effects = app.handle(Key::Enter);
     let pool = PRESET_NAMES[selected];
     assert!(
         matches!(
             effects.as_slice(),
             [_, Effect::PlayBots { game: GameId::Chess, pool: p, choice }]
-                if *p == pool && *choice == encode(&4u8)
+                if *p == pool && *choice == encode(&2u8)
         ),
         "{effects:?}"
     );
     assert_eq!(app.screen, Screen::JoiningBots);
-    // Refused, or turned away on the way in: back to quick play.
+    // Refused, or turned away on the way in: back to where it was chosen.
     app.join_failed("Too fast.".into());
-    let Screen::Home { selected } = app.screen else {
-        panic!("{:?}", app.screen);
-    };
-    assert_eq!(app.home_items()[selected], HomeItem::QuickPlay);
+    assert_eq!(home_at(&app), HomeItem::Game(0));
     app.handle(Key::Enter);
     app.handle(Key::Enter);
     assert_eq!(app.screen, Screen::JoiningBots);
     app.bots_failed("Try again.".into());
-    let Screen::Home { selected } = app.screen else {
-        panic!("{:?}", app.screen);
-    };
-    assert_eq!(app.home_items()[selected], HomeItem::QuickPlay);
+    assert_eq!(home_at(&app), HomeItem::Game(0));
     app.handle(Key::Enter);
     let effects = click(&mut app, Hit::Preset(0));
     assert!(
@@ -381,28 +416,45 @@ fn pairing_plays_the_computer_at_the_level_chosen() {
         ),
         "{effects:?}"
     );
+    app.handle(Key::Esc);
+    assert_eq!(home_at(&app), HomeItem::Game(0), "called off");
 
-    // Back to people, and up to the presets again.
-    let mut app = pairing();
-    chess(&mut app).prefs.computer = true;
-    chess(&mut app).screen = ChessScreen::Pairing {
-        selected: 5,
-        against: true,
-    };
-    // From level 3, down to 1, then a person.
-    keys(&mut app, &[Key::Left; 3]);
-    assert_eq!(chess(&mut app).prefs.opponent(), None);
+    // Up from the level to the presets, and Esc home.
+    app.handle(Key::Enter);
+    keys(&mut app, &[Key::Down; 5]);
     app.handle(Key::Up);
     assert_eq!(
         chess(&mut app).screen,
         ChessScreen::Pairing {
-            selected: 5,
-            against: false
+            selected: 9,
+            computer: true,
+            on_level: false
         }
     );
+    app.handle(Key::Esc);
+    assert_eq!(home_at(&app), HomeItem::Game(0));
+}
+
+#[test]
+fn quick_pairing_finds_people_only() {
+    let mut app = pairing();
+    // Down to the last row, and no further.
+    keys(&mut app, &[Key::Down; 5]);
+    let ChessScreen::Pairing {
+        selected,
+        computer: false,
+        on_level: false,
+    } = chess(&mut app).screen
+    else {
+        panic!("{:?}", chess(&mut app).screen);
+    };
+    assert_eq!(chess(&mut app).hits.spot(Hit::Level), None);
+    // Even after a game with the computer.
+    chess(&mut app).prefs.challenge.level = 5;
+    let pool = PRESET_NAMES[selected];
     assert!(matches!(
         app.handle(Key::Enter).as_slice(),
-        [_, Effect::QuickPlay { pool: "5+3", .. }]
+        [_, Effect::QuickPlay { pool: p, .. }] if *p == pool
     ));
 }
 
@@ -669,7 +721,7 @@ fn the_mouse_works_only_while_the_board_or_chess_screens_show() {
         "{effects:?}"
     );
 
-    app.go_home(HomeItem::Game(0), None);
+    app.go_home(HomeItem::Game(1), None);
     app.handle(Key::Enter);
     assert_eq!(chess(&mut app).screen, ChessScreen::Settings);
     let effects = click(&mut app, Hit::Setting(0));
@@ -776,23 +828,57 @@ fn a_premove_can_be_called_off_or_turned_off() {
     assert_eq!(inputs(&moved(&mut app, playing(&["e2e4"]))), []);
 }
 
-#[test]
-fn a_game_against_the_computer_from_pairing_offers_another_match() {
+/// A quick-play match, over: Ann resigned to the computer.
+fn lost_to_the_computer() -> std::sync::Arc<dyn game_api::AnyView> {
     use game_api::{Game, PhaseView, Room, RoomKind, RoomSettings};
     let settings = ChessSettings {
         control: TimeControl::minutes(5, 3),
         side: Side::White,
         level: 3,
     };
-    let settings = RoomSettings::new(settings, RoomKind::Match).unwrap();
+    let settings = RoomSettings::<chess_core::round::Chess>::new(settings, RoomKind::Match);
     let players = vec![entrant(ANN), chess_core::round::Chess::bot(0)];
-    let mut room = Room::new_match(settings, 1, players);
+    let mut room = Room::new_match(settings.unwrap(), 1, players);
     room.advance(std::time::Duration::from_secs(5));
     assert!(matches!(room.view().shell.phase, PhaseView::Running { .. }));
     room.play(ANN, ChessInput::Resign, None);
     assert!(matches!(room.view().shell.phase, PhaseView::Results { .. }));
-    let screen = shown(&app_in(ANN, room.view()), 80, 24);
-    // Enter opens quick pairing, which keeps the choice of the computer.
+    std::sync::Arc::new(room.view())
+}
+
+#[test]
+fn after_the_computer_enter_goes_back_to_where_it_was_chosen() {
+    // From "Play the computer": Enter opens it again.
+    let mut app = play_the_computer();
+    app.handle(Key::Enter);
+    assert!(app.enter_room(ANN, lost_to_the_computer()));
+    let screen = shown(&app, 80, 24);
+    assert!(
+        screen.contains("Enter play the computer again · Esc home"),
+        "{screen}"
+    );
+    let effects = app.handle(Key::Enter);
+    assert_eq!(effects, [Effect::LeaveRoom]);
+    assert_eq!(app.screen, Screen::Game);
+    assert!(matches!(
+        chess(&mut app).screen,
+        ChessScreen::Pairing { computer: true, .. }
+    ));
+
+    // Offered while waiting for a person: quick pairing again.
+    let mut app = pairing();
+    app.handle(Key::Enter);
+    app.online.waited = shell_tui::app::BOTS_OFFERED_AFTER;
+    app.handle(Key::Char('b'));
+    assert!(app.enter_room(ANN, lost_to_the_computer()));
+    let screen = shown(&app, 80, 24);
     assert!(screen.contains("Enter find another match"), "{screen}");
-    assert!(!screen.contains("again ·"), "{screen}");
+    app.handle(Key::Enter);
+    assert!(matches!(
+        chess(&mut app).screen,
+        ChessScreen::Pairing {
+            computer: false,
+            ..
+        }
+    ));
 }

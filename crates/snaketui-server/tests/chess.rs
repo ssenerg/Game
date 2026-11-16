@@ -8,7 +8,10 @@ use std::time::Duration;
 
 use common::accounts::line_of;
 use common::accounts::{DOWN, UP, connect_as, make_friends, sign_up};
-use common::chess::{LEFT, RIGHT, account, back, challenge, play, start, two_moves_then_ann_drops};
+use common::chess::{
+    LEFT, RIGHT, account, back, challenge, play, play_the_computer, quick_pairing, start,
+    two_moves_then_ann_drops,
+};
 use common::rooms::{create_room, join_room};
 use common::*;
 
@@ -130,11 +133,10 @@ async fn quick_pairing_keeps_presets_apart_and_rates_each_category_alone() {
     let server = chess_server();
     let (mut ann, _) = account(server.addr, "ann").await;
     let (mut ben, _) = account(server.addr, "ben").await;
-    // From the top of the home menu to quick play. Pairing starts on 5+3:
-    // up and left is bullet's 1+0, down and left twice rapid's 10+0.
+    // To quick play. Pairing starts on 5+3: up and left is bullet's 1+0,
+    // down and left twice rapid's 10+0.
     for p in [&mut ann, &mut ben] {
-        p.send(DOWN).await;
-        p.send(ENTER).await;
+        quick_pairing(p).await;
     }
     choose_pool(&mut ann, &[UP, LEFT], "1+0 bullet").await;
     choose_pool(&mut ben, &[DOWN, LEFT, LEFT], "10+0 rapid").await;
@@ -363,18 +365,16 @@ async fn a_move_and_the_computer_answers(p: &mut Player) {
 }
 
 #[tokio::test]
-async fn a_guest_plays_the_computer_from_quick_pairing() {
+async fn a_guest_plays_the_computer() {
     let server = chess_server();
     let mut p = guest(&server).await;
-    p.send(DOWN).await;
-    p.send(ENTER).await;
-    p.wait_for("Quick pairing").await;
-    // From 5+3 down to who to play, to level 1; then up to bullet's 2+1,
+    play_the_computer(&mut p).await;
+    // From 5+3 down to the level, from 3 to 1; then up to bullet's 2+1,
     // and left to 1+0.
-    for key in [DOWN, DOWN, DOWN, RIGHT] {
+    for key in [DOWN, DOWN, DOWN, LEFT, LEFT] {
         p.send(key).await;
     }
-    p.wait_for("◂ the computer, level 1 ▸").await;
+    p.wait_for("◂ 1 of 5 ▸").await;
     for key in [UP, UP, UP, UP, LEFT] {
         p.send(key).await;
     }
@@ -388,12 +388,10 @@ async fn a_guest_plays_the_computer_from_quick_pairing() {
 async fn the_queue_offers_the_computer_after_a_wait() {
     let server = chess_server();
     let mut p = guest(&server).await;
-    p.send(DOWN).await;
-    p.send(ENTER).await;
-    p.wait_for("Quick pairing").await;
+    quick_pairing(&mut p).await;
     p.send(ENTER).await;
     p.wait_for("Finding a match").await;
-    assert!(!p.text().contains("computer"), "{}", p.text());
+    assert!(!p.text().contains("b play the computer"), "{}", p.text());
     p.wait_until("the computer offered", Duration::from_secs(30), |p| {
         p.text().contains("b play the computer")
     })
@@ -428,13 +426,11 @@ async fn a_host_plays_the_computer_in_a_private_room() {
 async fn a_dropped_player_comes_back_to_their_game_against_the_computer() {
     let server = chess_server();
     let (mut ann, key) = account(server.addr, "ann").await;
-    ann.send(DOWN).await;
-    ann.send(ENTER).await;
-    ann.wait_for("Quick pairing").await;
-    for key in [DOWN, DOWN, DOWN, RIGHT] {
+    play_the_computer(&mut ann).await;
+    for key in [DOWN, DOWN, DOWN, LEFT, LEFT] {
         ann.send(key).await;
     }
-    ann.wait_for("◂ the computer, level 1 ▸").await;
+    ann.wait_for("◂ 1 of 5 ▸").await;
     ann.send(ENTER).await;
     ann.wait_for("Computer · level 1").await;
     a_move_and_the_computer_answers(&mut ann).await;

@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 
 use russh::keys::PrivateKey;
 
-use super::accounts::{DOWN, UP, connect_as, sign_up};
+use super::accounts::{DOWN, QUICK_PLAY, connect_as, pick_entry, pick_named, sign_up};
 use super::rooms::{create_room, join_room};
 use super::*;
 
@@ -18,15 +18,26 @@ pub async fn guest(addr: SocketAddr) -> Player {
     p
 }
 
-/// A new account called `name`, opening chess with its own key, at the
-/// top of the home menu.
+/// A new account called `name`, opening chess with its own key, on the
+/// home menu's Quick play.
 pub async fn account(addr: SocketAddr, name: &str) -> (Player, PrivateKey) {
     let key = new_key();
     let mut p = connect_as(addr, Login::KeyAs(&key, "chess")).await;
     p.wait_for("Board and pieces").await;
     sign_up(&mut p, name).await;
-    p.send(UP).await;
     (p, key)
+}
+
+/// Quick pairing's presets, from the home menu.
+pub async fn quick_pairing(p: &mut Player) {
+    pick_entry(p, QUICK_PLAY).await;
+    p.wait_for("Quick pairing").await;
+}
+
+/// The computer's presets, on 5+3, from the home menu.
+pub async fn play_the_computer(p: &mut Player) {
+    pick_named(p, "Play the computer").await;
+    p.wait_for("Level").await;
 }
 
 /// Back with `key` after a dropped connection, in the game still going.

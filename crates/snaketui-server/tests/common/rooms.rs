@@ -4,7 +4,6 @@ use std::net::SocketAddr;
 
 use super::*;
 
-const DOWN: &[u8] = b"\x1b[B";
 const BACKSPACE: &[u8] = b"\x7f";
 
 /// A guest called `~name` on the home menu.
@@ -14,12 +13,9 @@ pub async fn guest(addr: SocketAddr, name: &str, cols: u32, rows: u32) -> Player
     p
 }
 
-/// Presses Down `n` times on a fresh home menu, then Enter.
+/// Picks the home menu's entry `n`, numbered as on Snake's.
 async fn home_pick(p: &Player, n: usize) {
-    for _ in 0..n {
-        p.send(DOWN).await;
-    }
-    p.send(ENTER).await;
+    super::accounts::pick_entry(p, n).await;
 }
 
 /// Makes a private room from a fresh home menu and returns its code.

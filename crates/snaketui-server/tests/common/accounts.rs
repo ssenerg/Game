@@ -16,7 +16,8 @@ pub const WRONG: &str = "Wrong username or password.";
 // A guest's home menu: Single player, Quick play, Create, Join, Nickname,
 // Sign up, Sign in, Leaderboard, Quit. An account's: ..., Join, Friends,
 // Account, Leaderboard, Quit. Signing up or in leaves the cursor on Quick
-// play.
+// play. Chess has two entries of its own where Snake has Single player:
+// see pick_entry.
 pub const QUICK_PLAY: usize = 1;
 pub const SIGN_UP: usize = 5;
 pub const SIGN_IN: usize = 6;
@@ -45,9 +46,43 @@ pub async fn pick(p: &Player, from: usize, to: usize) {
     down_enter(p, to - from).await;
 }
 
+/// Rows down from the home menu's cursor to the entry `label`, as the
+/// screen shows them; up if negative.
+fn rows_to(p: &Player, label: &str) -> isize {
+    let text = p.text();
+    let row = |what: &str| {
+        let row = text.lines().position(|l| l.contains(what));
+        row.unwrap_or_else(|| panic!("no {what} on the home menu: {text}")) as isize
+    };
+    row(label) - row("❯")
+}
+
+/// Moves the home menu's cursor `rows` down, or up if negative, and picks
+/// what it's on.
+async fn step_enter(p: &Player, rows: isize) {
+    let key = if rows < 0 { UP } else { DOWN };
+    for _ in 0..rows.unsigned_abs() {
+        p.send(key).await;
+    }
+    p.send(ENTER).await;
+}
+
+/// Picks the home menu's entry `label`, from wherever its cursor is.
+pub async fn pick_named(p: &Player, label: &str) {
+    step_enter(p, rows_to(p, label)).await;
+}
+
+/// Picks the home menu's entry `at`, numbered as on Snake's, from wherever
+/// its cursor is: counted from Quick play, so it's the same entry in a
+/// game with more entries of its own above it, as chess has.
+pub async fn pick_entry(p: &Player, at: usize) {
+    let rows = rows_to(p, "Quick play") + at as isize - QUICK_PLAY as isize;
+    step_enter(p, rows).await;
+}
+
 /// Signs up from a fresh home menu.
 pub async fn sign_up(p: &mut Player, name: &str) {
-    pick(p, 0, SIGN_UP).await;
+    pick_entry(p, SIGN_UP).await;
     p.wait_for("Sign up").await;
     p.send(name.as_bytes()).await;
     p.send(ENTER).await;
@@ -61,7 +96,7 @@ pub async fn sign_up(p: &mut Player, name: &str) {
 /// Fills in the sign-in form from a fresh home menu. With a key the form
 /// ends with "remember this machine", left ticked.
 pub async fn try_sign_in(p: &mut Player, name: &str, password: &str, with_key: bool) {
-    pick(p, 0, SIGN_IN).await;
+    pick_entry(p, SIGN_IN).await;
     p.wait_for("Sign in").await;
     p.send(name.as_bytes()).await;
     p.send(ENTER).await;

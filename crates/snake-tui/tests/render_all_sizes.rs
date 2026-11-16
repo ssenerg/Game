@@ -809,7 +809,7 @@ fn a_match_against_bots_offers_them_again() {
     app.screen = Screen::Room;
     app.enter_room(1, Arc::new(round.view()));
     let text = shown(&app, 100, 30);
-    assert!(text.contains("Enter play the bots again"), "{text}");
+    assert!(text.contains("Enter play bots again"), "{text}");
 }
 
 #[test]

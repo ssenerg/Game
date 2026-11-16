@@ -211,32 +211,33 @@ fn screens() -> Vec<App> {
     app_.screen = Screen::Game;
     chess(&mut app_).screen = ChessScreen::Challenge { selected: 3 };
     apps.push(app_);
-    // The home menu; quick pairing's presets, with every one chosen, a
-    // signed-in player's ratings and a notice; and waiting in a pool.
+    // The home menu; quick pairing's presets and the computer's, with
+    // every one chosen, a signed-in player's ratings and a notice; and
+    // waiting in a pool.
     apps.push(app(ANN, &views[1], home));
-    for selected in 0..PRESETS.len() {
-        let mut app = app(ANN, &views[1], home);
-        app.go_home(HomeItem::QuickPlay, None);
-        app.handle(Key::Enter);
-        chess(&mut app).screen = ChessScreen::Pairing {
-            selected,
-            against: false,
-        };
-        apps.push(app);
-    }
-    // Who to play: a person, and the computer.
     for computer in [false, true] {
-        let mut app = app(ANN, &views[1], home);
-        app.go_home(HomeItem::QuickPlay, None);
-        app.handle(Key::Enter);
-        let ui = chess(&mut app);
-        ui.prefs.computer = computer;
-        ui.screen = ChessScreen::Pairing {
-            selected: 9,
-            against: true,
-        };
-        apps.push(app);
+        for selected in 0..PRESETS.len() {
+            let mut app = app(ANN, &views[1], home);
+            app.go_home(HomeItem::QuickPlay, None);
+            app.handle(Key::Enter);
+            chess(&mut app).screen = ChessScreen::Pairing {
+                selected,
+                computer,
+                on_level: false,
+            };
+            apps.push(app);
+        }
     }
+    // On the computer's level.
+    let mut app_ = app(ANN, &views[1], home);
+    app_.go_home(HomeItem::Game(0), None);
+    app_.handle(Key::Enter);
+    chess(&mut app_).screen = ChessScreen::Pairing {
+        selected: 9,
+        computer: true,
+        on_level: true,
+    };
+    apps.push(app_);
     let rated = |app: &mut App| {
         home(app);
         app.online.account = Some(Profile {

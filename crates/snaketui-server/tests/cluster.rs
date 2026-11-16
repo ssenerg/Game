@@ -283,8 +283,7 @@ async fn a_player_back_through_another_server_hears_their_new_rating() {
     let (mut ann, key) = common::chess::account(servers[0].addr, "ann").await;
     let (mut ben, _) = common::chess::account(servers[0].addr, "ben").await;
     for p in [&mut ann, &mut ben] {
-        p.send(DOWN).await;
-        p.send(ENTER).await;
+        common::chess::quick_pairing(p).await;
         p.wait_for("5+3 blitz · sides drawn · rated").await;
         p.send(ENTER).await;
     }

@@ -97,11 +97,9 @@ pub struct Prefs {
     /// the lobby are kept here too. Its level is the computer's wherever
     /// they play it.
     pub challenge: ChessSettings,
-    /// The preset quick pairing last found them a game in, one of
+    /// The preset they last played, with a person or the computer, one of
     /// [`PRESETS`].
     pub pairing: TimeControl,
-    /// Quick pairing plays the computer, instead of finding a person.
-    pub computer: bool,
 }
 
 impl Default for Prefs {
@@ -117,7 +115,6 @@ impl Default for Prefs {
             confirm_resign: true,
             challenge: ChessSettings::default(),
             pairing: TimeControl::minutes(5, 3),
-            computer: false,
         }
     }
 }
@@ -148,7 +145,6 @@ impl Prefs {
             ("side", self.challenge.side.name().to_string()),
             ("level", self.challenge.level.to_string()),
             ("pairing", self.pairing.to_string()),
-            ("against", against(self.computer).to_string()),
         ]
         .iter()
         .map(|(key, value)| format!("{key}={value}\n"))
@@ -210,39 +206,11 @@ impl Prefs {
                         .position(|&name| name == value)
                         .map(|i| PRESETS[i]),
                 ),
-                "against" => set(
-                    &mut prefs.computer,
-                    [false, true].into_iter().find(|&c| against(c) == value),
-                ),
                 _ => {}
             }
         }
         prefs
     }
-
-    /// Who quick pairing plays: a person, or the computer at its level.
-    pub fn opponent(&self) -> Option<u8> {
-        self.computer.then_some(self.challenge.level)
-    }
-
-    /// The opponent after this one, or before it when `back`: a person,
-    /// then the computer at each level, then a person again.
-    pub fn step_opponent(&mut self, back: bool) {
-        let all: Vec<Option<u8>> = std::iter::once(None).chain(LEVELS.map(Some)).collect();
-        let i = all.iter().position(|&o| o == self.opponent()).unwrap_or(0);
-        let n = all.len();
-        match all[if back { (i + n - 1) % n } else { (i + 1) % n }] {
-            Some(level) => {
-                self.computer = true;
-                self.challenge.level = level;
-            }
-            None => self.computer = false,
-        }
-    }
-}
-
-fn against(computer: bool) -> &'static str {
-    if computer { "computer" } else { "person" }
 }
 
 fn set<T>(slot: &mut T, value: Option<T>) {
@@ -332,12 +300,11 @@ mod tests {
                 level: 5,
             },
             pairing: TimeControl::minutes(1, 0),
-            computer: true,
         };
         assert_eq!(Prefs::from_saved_text(&prefs.to_saved_text()), prefs);
         assert_eq!(Prefs::from_saved_text(""), Prefs::default());
         let odd = Prefs::from_saved_text(
-            "board=plaid\nbase_s=0\nincrement_s=x\nnoise\npieces=letters\npairing=4+0\nlevel=9\nagainst=cat",
+            "board=plaid\nbase_s=0\nincrement_s=x\nnoise\npieces=letters\npairing=4+0\nlevel=9\nagainst=computer",
         );
         assert_eq!(
             odd,
@@ -368,20 +335,5 @@ mod tests {
         assert_eq!(step_level(1, true), 1);
         assert_eq!(step_level(3, false), 4);
         assert_eq!(step_level(5, false), 5);
-    }
-
-    #[test]
-    fn the_opponent_steps_from_a_person_through_each_level() {
-        let mut prefs = Prefs::default();
-        assert_eq!(prefs.opponent(), None);
-        prefs.step_opponent(false);
-        assert_eq!(prefs.opponent(), Some(1));
-        prefs.step_opponent(true);
-        assert_eq!(prefs.opponent(), None);
-        prefs.step_opponent(true);
-        assert_eq!(prefs.opponent(), Some(5));
-        prefs.step_opponent(false);
-        assert_eq!(prefs.opponent(), None);
-        assert_eq!(prefs.challenge.level, 5, "the level stays for next time");
     }
 }

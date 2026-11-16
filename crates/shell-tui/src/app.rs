@@ -180,6 +180,10 @@ pub struct App {
     /// The home entry the open game's own screens were opened from, which
     /// leaving them goes back to.
     game_item: HomeItem,
+    /// The home entry the open game's screen that started the last match
+    /// against bots was opened from, which Enter on its results opens
+    /// again; `None` when quick play's wait offered them.
+    bots_from: Option<HomeItem>,
     /// The pictures each frame shows, once the terminal is known to show
     /// them.
     pictures: Option<Pictures>,
@@ -210,6 +214,7 @@ impl App {
             open: 0,
             opened: false,
             game_item: HomeItem::Game(0),
+            bots_from: None,
             pictures: None,
             key_releases: false,
         };
@@ -230,6 +235,7 @@ impl App {
         if i != self.open {
             self.open = i;
             self.game_item = HomeItem::Game(0);
+            self.bots_from = None;
         }
         self.opened = true;
     }
@@ -458,6 +464,7 @@ impl App {
             Next::Room => self.go_home(HomeItem::QuickPlay, None),
             Next::Queue(pool) => self.queue(id, pool, effects),
             Next::PlayBots(pool) => {
+                self.bots_from = Some(self.game_item);
                 self.online.confirm_small = false;
                 self.screen = Screen::JoiningBots;
                 effects.push(self.play_bots(i, pool));
@@ -787,12 +794,19 @@ impl App {
 
     pub fn bots_failed(&mut self, why: String) {
         if matches!(self.screen, Screen::Finding | Screen::JoiningBots) {
-            self.go_home(HomeItem::QuickPlay, Some(why));
+            self.go_home(self.bots_home(), Some(why));
         }
+    }
+
+    /// The home entry bots were last chosen from: the open game's own, or
+    /// quick play's.
+    fn bots_home(&self) -> HomeItem {
+        self.bots_from.unwrap_or(HomeItem::QuickPlay)
     }
 
     /// Into quick play, waiting in `game`'s `pool`.
     fn queue(&mut self, game: GameId, pool: &'static str, effects: &mut Vec<Effect>) {
+        self.bots_from = None;
         let online = &mut self.online;
         online.confirm_small = false;
         online.waited = Duration::ZERO;
@@ -911,6 +925,7 @@ impl App {
                 Key::Enter | Key::Char(' ') if kind == RoomKind::Match => {
                     // Against bots, bots again; otherwise people.
                     let bots = self.online.room.as_ref().is_some_and(InRoom::against_bots);
+                    let chosen_at = self.bots_again_at();
                     effects.push(Effect::LeaveRoom);
                     self.leave_room();
                     let game = self.ui().id();
@@ -922,7 +937,8 @@ impl App {
                             effects.push(self.play_bots(i, pool));
                         }
                         Some(pool) => self.queue(game, pool, effects),
-                        None => self.choose(HomeItem::QuickPlay, effects),
+                        // Back to where they were chosen.
+                        None => self.choose(chosen_at.unwrap_or(HomeItem::QuickPlay), effects),
                     }
                     return;
                 }
@@ -935,6 +951,15 @@ impl App {
             effects.push(Effect::LeaveRoom);
             self.leave_room();
         }
+    }
+
+    /// Where Enter on this match's results chooses the same bots again,
+    /// for a game that doesn't keep its pool: the home entry of the screen
+    /// they were chosen on.
+    pub fn bots_again_at(&self) -> Option<HomeItem> {
+        let room = self.online.room.as_ref()?;
+        let match_ = room.shell().kind == RoomKind::Match;
+        self.bots_from.filter(|_| match_ && room.against_bots())
     }
 
     fn leave_room(&mut self) {
@@ -1344,7 +1369,7 @@ impl App {
         match self.screen {
             Screen::Joining { by_code: true } => self.go_home(HomeItem::JoinCode, None),
             Screen::Joining { by_code: false } => self.go_home(HomeItem::CreateRoom, None),
-            Screen::JoiningBots => self.go_home(HomeItem::QuickPlay, None),
+            Screen::JoiningBots => self.go_home(self.bots_home(), None),
             Screen::JoiningToWatch => self.screen = Screen::Friends { selected: 0 },
             _ => {}
         }

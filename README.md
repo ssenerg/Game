@@ -190,14 +190,15 @@ opens it, and new players choose between the two.
   classical 30+0 and 30+20. Pick one with the arrows and Enter, and you're
   paired with the next player who picks the same, sides drawn. Quick play
   opens on the preset you played last.
-- **The computer.** Below the presets, "Against" turns from a person to
-  the computer at levels 1 to 5, and Enter then plays it at once, at the
-  preset chosen. Level 1 often blunders; level 5 looks as deep as its
-  budget of positions allows. Games against the computer are unrated. It
-  thinks for a moment on its own clock, turns draws down, and never
-  resigns. Quick pairing keeps your choice, so after a game one Enter
-  opens it and another plays again. After 20 seconds waiting for a person,
-  `b` plays the computer instead, at the level you last chose.
+- **The computer.** "Play the computer", at the top of chess's home menu,
+  lists the same presets with a row below them for its level, 1 to 5, and
+  Enter plays it at once, at the preset chosen. Level 1 often blunders;
+  level 5 looks as deep as its budget of positions allows. Games against
+  the computer are unrated. It thinks for a moment on its own clock, turns
+  draws down, and never resigns. After a game, one Enter opens the presets
+  again, still on yours, and another plays again. After 20 seconds waiting
+  for a person in quick play, `b` plays the computer instead, at the level
+  you last chose.
 - **Ratings.** Signed-in players' quick-pairing games are rated with
   Glicko-2, one rating for each speed, so a rapid game never moves your
   bullet rating. Everyone starts at 1500. A rating shows a `?` while it's
@@ -238,11 +239,11 @@ opens it, and new players choose between the two.
 - **Clocks** are the server's, with the increment added after each move
   and a little of each move's lag given back. Each side has 30 seconds for
   their first move, or the game is aborted.
-- **Settings**, on chess's home menu: the board's colors, pieces as
-  pictures or not, glyphs or letters for them otherwise (some terminals
-  draw the glyphs badly), coordinates, promoting to a queen without
-  asking, premoves, whether letter keys type moves or move the cursor like
-  WASD and HJKL, and asking before resigning.
+- **Settings**, under "Board and pieces" on chess's home menu: the
+  board's colors, pieces as pictures or not, glyphs or letters for them
+  otherwise (some terminals draw the glyphs badly), coordinates, promoting
+  to a queen without asking, premoves, whether letter keys type moves or
+  move the cursor like WASD and HJKL, and asking before resigning.
 - **Dropped connections.** If a signed-in player's connection drops
   mid-game, or they quit, their seat waits 90 seconds while their clock
   runs on; the other player sees how long. Connecting again, with their

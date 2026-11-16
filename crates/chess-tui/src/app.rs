@@ -55,10 +55,14 @@ pub enum ChessScreen {
     /// A private room's challenge, at row `selected`: everyone reads it,
     /// the host changes it.
     Challenge { selected: usize },
-    /// Quick pairing's presets, on [`PRESETS`]`[selected]`; or on the row
-    /// below them that says who to play, `against`, where Enter still
-    /// plays that preset.
-    Pairing { selected: usize, against: bool },
+    /// The presets, on [`PRESETS`]`[selected]`: quick pairing's, to find
+    /// a person, or the `computer`'s, with a row below them of its level,
+    /// where Enter still plays that preset, `on_level`.
+    Pairing {
+        selected: usize,
+        computer: bool,
+        on_level: bool,
+    },
 }
 
 /// Rows of a private room's challenge: minutes, increment, side, and the
@@ -159,8 +163,8 @@ pub enum Hit {
     OpenMenu,
     /// Quick pairing's preset, at this place in [`PRESETS`].
     Preset(usize),
-    /// Quick pairing's row of who to play.
-    Against,
+    /// The computer's level, below its presets.
+    Level,
     /// The settings screen's row.
     Setting(usize),
     /// The challenge screen's row.
@@ -650,15 +654,16 @@ impl ChessUi {
             return Reply::default();
         }
         match (self.screen, self.hits.at(mouse)) {
-            (ChessScreen::Pairing { .. }, Some(Hit::Preset(i))) => {
-                self.pairing_key(i, false, Key::Enter)
+            (ChessScreen::Pairing { computer, .. }, Some(Hit::Preset(i))) => {
+                self.pairing_key(i, computer, false, Key::Enter)
             }
-            (ChessScreen::Pairing { selected, .. }, Some(Hit::Against)) => {
+            (ChessScreen::Pairing { selected, .. }, Some(Hit::Level)) => {
                 self.screen = ChessScreen::Pairing {
                     selected,
-                    against: true,
+                    computer: true,
+                    on_level: true,
                 };
-                self.pairing_key(selected, true, Key::Right)
+                self.pairing_key(selected, true, true, Key::Right)
             }
             (ChessScreen::Settings, Some(Hit::Setting(row))) => {
                 self.selected = row;
@@ -723,29 +728,44 @@ impl ChessUi {
         }
     }
 
-    fn pairing_key(&mut self, selected: usize, against: bool, key: Key) -> Reply {
+    /// A key on the presets: quick pairing's, or the `computer`'s, with
+    /// its level's row below them, which the player is `on_level`.
+    fn pairing_key(&mut self, selected: usize, computer: bool, on_level: bool, key: Key) -> Reply {
         let selected = selected.min(PRESETS.len() - 1);
+        let on_level = computer && on_level;
         let last_row = pairing_rows()
             .last()
             .is_some_and(|(_, presets)| presets.contains(&selected));
         let left = matches!(key, Key::Left | Key::Char('a' | 'h'));
         let moved = match key {
-            Key::Left | Key::Right | Key::Char('a' | 'h' | 'd' | 'l') if against => {
-                self.prefs.step_opponent(left);
-                return Reply::fx(self.save());
+            Key::Left | Key::Right | Key::Char('a' | 'h' | 'd' | 'l') if on_level => {
+                let level = &mut self.prefs.challenge.level;
+                let was = *level;
+                *level = prefs::step_level(was, left);
+                return if *level == was {
+                    Reply::default()
+                } else {
+                    Reply::fx(self.save())
+                };
             }
             Key::Left | Key::Char('a' | 'h') => Some((selected.saturating_sub(1), false)),
             Key::Right | Key::Char('d' | 'l') => {
                 Some(((selected + 1).min(PRESETS.len() - 1), false))
             }
-            Key::Up | Key::Char('w' | 'k') if against => Some((selected, false)),
+            Key::Up | Key::Char('w' | 'k') if on_level => Some((selected, false)),
             Key::Up | Key::Char('w' | 'k') => Some((pairing_step(selected, false), false)),
-            Key::Down | Key::Char('s' | 'j') if against || last_row => Some((selected, true)),
+            Key::Down | Key::Char('s' | 'j') if on_level || (computer && last_row) => {
+                Some((selected, computer))
+            }
             Key::Down | Key::Char('s' | 'j') => Some((pairing_step(selected, true), false)),
             _ => None,
         };
-        if let Some((selected, against)) = moved {
-            self.screen = ChessScreen::Pairing { selected, against };
+        if let Some((selected, on_level)) = moved {
+            self.screen = ChessScreen::Pairing {
+                selected,
+                computer,
+                on_level,
+            };
             return Reply::default();
         }
         match key {
@@ -755,7 +775,7 @@ impl ChessUi {
                 let pool = PRESET_NAMES[selected];
                 Reply {
                     fx: vec![self.save()],
-                    next: if self.prefs.computer {
+                    next: if computer {
                         Next::PlayBots(pool)
                     } else {
                         Next::Queue(pool)
@@ -765,6 +785,17 @@ impl ChessUi {
             }
             _ => Reply::default(),
         }
+    }
+
+    /// The presets, at the one last played: to find a person, or to play
+    /// the `computer`.
+    fn open_pairing(&mut self, computer: bool) {
+        let last = PRESETS.iter().position(|&p| p == self.prefs.pairing);
+        self.screen = ChessScreen::Pairing {
+            selected: last.unwrap_or_default(),
+            computer,
+            on_level: false,
+        };
     }
 
     fn challenge_key(&mut self, selected: usize, key: Key, room: Option<&InRoom>) -> Reply {
@@ -820,11 +851,14 @@ impl GameUi for ChessUi {
     }
 
     fn home_items(&self) -> &'static [&'static str] {
-        &["Board and pieces"]
+        &["Play the computer", "Board and pieces"]
     }
 
-    fn open(&mut self, _: usize) {
-        self.screen = ChessScreen::Settings;
+    fn open(&mut self, item: usize) {
+        match item {
+            0 => self.open_pairing(true),
+            _ => self.screen = ChessScreen::Settings,
+        }
     }
 
     fn room_note(&self) -> Option<String> {
@@ -841,11 +875,7 @@ impl GameUi for ChessUi {
     }
 
     fn quick_play(&mut self, _: Size) -> Result<QuickStart, String> {
-        let last = PRESETS.iter().position(|&p| p == self.prefs.pairing);
-        self.screen = ChessScreen::Pairing {
-            selected: last.unwrap_or_default(),
-            against: false,
-        };
+        self.open_pairing(false);
         Ok(QuickStart::Choose)
     }
 
@@ -886,7 +916,11 @@ impl GameUi for ChessUi {
         match self.screen {
             ChessScreen::Settings => self.settings_key(key),
             ChessScreen::Challenge { selected } => self.challenge_key(selected, key, ctx.room),
-            ChessScreen::Pairing { selected, against } => self.pairing_key(selected, against, key),
+            ChessScreen::Pairing {
+                selected,
+                computer,
+                on_level,
+            } => self.pairing_key(selected, computer, on_level, key),
         }
     }
 

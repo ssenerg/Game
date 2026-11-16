@@ -27,7 +27,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
         phase => {
             ui.draw_round(frame, room, &app.ctx());
             if let PhaseView::Results { next_in } = phase {
-                draw_results(frame, ui, room, *next_in);
+                let again = ui.again_in_same_pool() || app.bots_again_at().is_some();
+                draw_results(frame, ui, room, *next_in, again);
             }
         }
     }
@@ -133,7 +134,14 @@ fn draw_lobby(
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
 }
 
-fn draw_results(frame: &mut Frame, ui: &dyn GameUi, room: &InRoom, next_in: Option<Duration>) {
+/// `again`: Enter plays the same bots again, after a match against them.
+fn draw_results(
+    frame: &mut Frame,
+    ui: &dyn GameUi,
+    room: &InRoom,
+    next_in: Option<Duration>,
+    again: bool,
+) {
     let view = room.shell();
     let height = 9 + view.placements.len() as u16;
     let (headline, color) = match view.winner() {
@@ -191,10 +199,10 @@ fn draw_results(frame: &mut Frame, ui: &dyn GameUi, room: &InRoom, next_in: Opti
     lines.push(Line::default());
     lines.push(match (view.kind, next_in) {
         _ if room.watching.is_some() => Line::styled("Esc leave", dim()),
-        // As Enter does: the same bots again only where the game keeps its
-        // choice of pool.
-        (RoomKind::Match, _) if room.against_bots() && ui.again_in_same_pool() => Line::styled(
-            format!("Enter play the {} again · Esc home", ui.bot_words().them),
+        // As Enter does: the same bots again where the game keeps its
+        // choice of pool, or they were chosen on its own screen.
+        (RoomKind::Match, _) if room.against_bots() && again => Line::styled(
+            format!("Enter play {} again · Esc home", ui.bot_words().them),
             dim(),
         ),
         (RoomKind::Match, _) => Line::styled("Enter find another match · Esc home", dim()),
