@@ -55,6 +55,8 @@ pub struct Marks {
     pub to: Vec<Square>,
     /// The move waiting for the player's turn.
     pub premove: Option<(Square, Square)>,
+    /// The piece being dragged from its square, and where the pointer is.
+    pub lifted: Option<(Square, (u16, u16))>,
 }
 
 /// Light and dark squares.
@@ -73,6 +75,10 @@ const FROM: Color = Color::Indexed(113);
 const TARGET: Color = Color::Indexed(174);
 const CURSOR: Color = Color::Indexed(117);
 const PREMOVE: Color = Color::Indexed(140);
+/// The square a dragged piece would be put down on, if it can go there.
+const HOVER: Color = Color::Indexed(215);
+/// A dragged piece where it was picked up.
+const GHOST: Color = Color::Indexed(242);
 const CHECK: Color = Color::Indexed(167);
 pub(super) const DOT: Color = Color::Indexed(58);
 
@@ -161,6 +167,20 @@ pub fn draw(
     let pictures = extras
         .pictures
         .filter(|_| prefs.images && w >= PICTURED.0 && h >= PICTURED.1);
+    // The piece being dragged, and the square under the pointer.
+    let lifted = marks
+        .lifted
+        .and_then(|(from, at)| Some((from, position.piece_at(from)?, at)));
+    let over = lifted.and_then(|(_, _, (x, y))| {
+        let (col, row) = (x.checked_sub(left)? / w, y.checked_sub(at.1)? / h);
+        (col < 8 && row < 8)
+            .then(|| square_at(col, row, bottom))
+            .flatten()
+    });
+    // The dragged piece shows on the square under the pointer as a picture,
+    // and as a letter right at the pointer: away from where it was, that
+    // shows faintly.
+    let moved = |sq: Square| lifted.is_some_and(|(from, _, _)| sq == from && over != Some(from));
     for row in 0..8 {
         for col in 0..8 {
             let Some(sq) = square_at(col, row, bottom) else {
@@ -168,8 +188,15 @@ pub fn draw(
             };
             let is_light = sq.is_light();
             let last = marks.last.is_some_and(|m| m.from == sq || m.to == sq);
-            let piece = position.piece_at(sq);
-            let bg = if marks.cursor == Some(sq) {
+            let ghost =
+                moved(sq) || (pictures.is_none() && lifted.is_some_and(|(from, _, _)| sq == from));
+            let dropped = lifted
+                .filter(|&(from, _, _)| pictures.is_some() && over == Some(sq) && sq != from)
+                .map(|(_, piece, _)| piece);
+            let piece = dropped.or(position.piece_at(sq));
+            let bg = if over == Some(sq) && marks.to.contains(&sq) {
+                HOVER
+            } else if marks.cursor == Some(sq) {
                 CURSOR
             } else if marks.check == Some(sq) {
                 CHECK
@@ -200,6 +227,10 @@ pub fn draw(
             // tall.
             let top = y + (h - 1) / 2;
             match piece {
+                Some((color, kind)) if ghost => {
+                    let style = Style::default().fg(GHOST).bg(bg);
+                    put(buf, mid, top, symbol(prefs.pieces, color, kind), style);
+                }
                 Some((color, kind)) => {
                     let style = Style::default()
                         .fg(piece_color(color))
@@ -214,6 +245,8 @@ pub fn draw(
             if let Some(pictures) = pictures {
                 let size = pictures::pixels(square, pictures.cell);
                 let picture = match piece {
+                    // Lifted from here: the letter shows it faintly.
+                    Some(_) if ghost => None,
                     Some((color, kind)) => Some(pictures::picture(color, kind, bg, size)),
                     None if marks.to.contains(&sq) => Some(pictures::dot(bg, size)),
                     None => None,
@@ -252,6 +285,16 @@ pub fn draw(
                 );
             }
         }
+    }
+    if let Some((_, (color, kind), (x, y))) =
+        lifted.filter(|_| pictures.is_none() && over.is_some())
+    {
+        let bg = buf.cell((x, y)).map_or(Color::Reset, |cell| cell.bg);
+        let style = Style::default()
+            .fg(piece_color(color))
+            .bg(bg)
+            .add_modifier(Modifier::BOLD);
+        put(buf, x, y, symbol(prefs.pieces, color, kind), style);
     }
 }
 

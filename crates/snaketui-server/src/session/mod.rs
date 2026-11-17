@@ -27,7 +27,7 @@ use crate::backend::SshBackend;
 use crate::games::{self, PoolKey};
 use crate::graphics::{self, Graphics, Protocol};
 use crate::identity::{Player, nickname};
-use crate::input::{Answer, Budget, KeyParser, STATUS_QUERY};
+use crate::input::{self, Answer, Budget, KeyParser, STATUS_QUERY};
 use crate::lobby::{CodeUnavailable, CreateRoom, FindRoom};
 use crate::matcher::REGION_WAIT;
 use crate::matchmaker::{BotMatch, Dequeue, Enqueue, Matched};
@@ -94,10 +94,11 @@ const LOCAL_REGION: &str = "local";
 
 /// Switch to the alternate screen and hide the cursor; and undo both.
 const ENTER_SCREEN: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H";
-const LEAVE_SCREEN: &[u8] = b"\x1b[0m\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l";
-/// The terminal reports the mouse's left button, as `CSI <` sequences.
-const MOUSE_ON: &[u8] = b"\x1b[?1000h\x1b[?1006h";
-const MOUSE_OFF: &[u8] = b"\x1b[?1006l\x1b[?1000l";
+const LEAVE_SCREEN: &[u8] = b"\x1b[0m\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?25h\x1b[?1049l";
+/// The terminal reports the mouse's buttons, and where it moves while one
+/// is down, as `CSI <` sequences.
+const MOUSE_ON: &[u8] = b"\x1b[?1000h\x1b[?1002h\x1b[?1006h";
+const MOUSE_OFF: &[u8] = b"\x1b[?1006l\x1b[?1002l\x1b[?1000l";
 /// Kitty's keyboard protocol, for terminals that speak it: keys come as
 /// codes and say when they're let go (flags 1, 2 and 8). Pushed onto the
 /// alternate screen's own stack, then popped.
@@ -1716,8 +1717,7 @@ impl Handler<Input> for SessionActor {
         for answer in self.parser.take_answers() {
             self.on_answer(answer, ctx);
         }
-        let allowed = self.keys.take(keys.len(), Instant::now());
-        keys.truncate(allowed);
+        input::within_budget(&mut keys, &mut self.keys, Instant::now());
         let answers = self.parser.take_reports();
         // The terminal answering a status query isn't the player doing
         // anything: it mustn't keep an idle player connected.

@@ -271,8 +271,8 @@ async fn friends_watch_a_game() {
 /// iTerm2's answers to the server's questions: its name, its cells'
 /// size, and its device attributes.
 const ITERM2: &[u8] = b"\x1bP>|iTerm2 3.7.5\x1b\\\x1b[6;16;8t\x1b[?62;4c";
-const MOUSE_ON: &[u8] = b"\x1b[?1000h\x1b[?1006h";
-const MOUSE_OFF: &[u8] = b"\x1b[?1006l\x1b[?1000l";
+const MOUSE_ON: &[u8] = b"\x1b[?1000h\x1b[?1002h\x1b[?1006h";
+const MOUSE_OFF: &[u8] = b"\x1b[?1006l\x1b[?1002l\x1b[?1000l";
 
 /// Where `p`'s board shows `square`, as in "e2": by the files along its
 /// bottom and the ranks down its left.
@@ -330,6 +330,34 @@ async fn iterm2_shows_pieces_as_pictures_and_the_mouse_moves_them() {
     ben.wait_for("1. e4").await;
     play(&mut ben, "1. e4", "e5").await;
     ann.wait_for("1. e4      e5").await;
+    // Drag the knight from g1 to f3, with more reports of the pointer on
+    // the way than a burst of keys may be: the release still counts.
+    drag(&ann, spot(&ann, "g1"), spot(&ann, "f3")).await;
+    ben.wait_for("2. Nf3").await;
+}
+
+/// The left button pressed at `from`, moved cell by cell to `to` and let
+/// go there.
+async fn drag(p: &Player, from: (u16, u16), to: (u16, u16)) {
+    let report =
+        |b: u8, (x, y): (u16, u16), fin: char| format!("\x1b[<{b};{};{}{fin}", x + 1, y + 1);
+    // A step from `a` toward `b`.
+    let toward = |a: u16, b: u16| match a.cmp(&b) {
+        std::cmp::Ordering::Less => a + 1,
+        std::cmp::Ordering::Greater => a - 1,
+        std::cmp::Ordering::Equal => a,
+    };
+    let mut bytes = report(0, from, 'M');
+    let (mut x, mut y) = from;
+    while (x, y) != to {
+        (x, y) = (toward(x, to.0), toward(y, to.1));
+        // Each cell many times over: hundreds of reports in all.
+        for _ in 0..40 {
+            bytes += &report(32, (x, y), 'M');
+        }
+    }
+    bytes += &report(0, to, 'm');
+    p.send(bytes.as_bytes()).await;
 }
 
 #[tokio::test]

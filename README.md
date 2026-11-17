@@ -223,7 +223,10 @@ opens it, and new players choose between the two.
   uses iTerm2's inline images or Kitty's graphics. Elsewhere, Terminal.app
   and tmux among them, they're glyphs or letters.
 - **The mouse** works on chess's screens: click a piece and then its
-  square, or drag it there. The game menu, a promotion's pieces, resigning,
+  square, or drag it there. A dragged piece follows the pointer, the
+  square under it lights up where it can go, and where it was it shows
+  faintly; let go off the board and it goes back. Put the king down on its
+  rook to castle. The game menu, a promotion's pieces, resigning,
   quick pairing's presets and opponent, and the settings take clicks too. Everywhere
   else the mouse is left alone, so a drag still selects text, such as a
   room's code.
@@ -232,10 +235,14 @@ opens it, and new players choose between the two.
   one move fits. Or pick a piece with the arrows and Enter, then its
   square. Esc opens a menu to offer or accept a draw, resign (it asks
   first), abort before both sides have moved, and flip the board.
-- **Premoves.** A move made while the other side thinks, typed or picked,
-  waits and is played the moment your turn comes, if it's legal then; a
-  pawn reaching the end becomes a queen. Backspace, or a click on another
-  square, calls it off. They're on unless the settings turn them off.
+- **Premoves.** A move made while the other side thinks, typed, picked or
+  dragged, waits and is played the moment your turn comes, if it's legal
+  then. A piece picked up shows every square it could reach by then: past
+  pieces in the way, onto your own pieces' squares to take back there, a
+  pawn's captures, and castling. A pawn reaching the end becomes what you
+  choose, or a queen if the settings say so. Backspace, or a click on
+  another square, calls it off. They're on unless the settings turn them
+  off.
 - **Clocks** are the server's, with the increment added after each move
   and a little of each move's lag given back. Each side has 30 seconds for
   their first move, or the game is aborted.

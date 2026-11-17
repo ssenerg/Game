@@ -9,11 +9,12 @@ use chess_core::control::{PRESETS, TimeControl};
 use chess_core::moves::Move;
 use chess_core::round::Chess;
 use chess_core::round::ChessInput;
-use chess_tui::{BoardLook, ChessScreen, MoveInput, PieceStyle};
+use chess_core::square::Square;
+use chess_tui::{BoardLook, ChessScreen, Hit, MoveInput, PieceStyle};
 use common::*;
 use game_api::{GameId, PhaseView, RatingKey, RoomView};
 use shell_tui::online::{HomeItem, Profile, ShownRating};
-use shell_tui::{App, Key, Screen};
+use shell_tui::{App, Key, Mouse, MouseKind, Screen};
 
 /// Every phase of a room worth drawing, with its moves and offers.
 fn views() -> Vec<RoomView<Chess>> {
@@ -79,6 +80,23 @@ fn app(me: u64, view: &RoomView<Chess>, tweak: impl Fn(&mut App)) -> App {
     let mut app = app_in(me, view.clone());
     tweak(&mut app);
     app
+}
+
+/// The mouse pressed on `from` and dragged to `to`'s top left corner, as
+/// they're drawn on 80×24.
+fn drag_over(app: &mut App, from: &str, to: &str) {
+    let mut at = |name: &str, kind| {
+        shown(app, 80, 24);
+        let square = Square::parse(name).unwrap();
+        let area = chess(app).hits.spot(Hit::Square(square)).unwrap();
+        app.handle(Key::Mouse(Mouse {
+            kind,
+            x: area.x,
+            y: area.y,
+        }));
+    };
+    at(from, MouseKind::Press);
+    at(to, MouseKind::Drag);
 }
 
 /// Out of the room, on the home menu.
@@ -158,6 +176,20 @@ fn screens() -> Vec<App> {
     apps.push(app(BEN, &views[3], |app| {
         typed(app, "e5\r");
     }));
+    // Where a piece picked up in the other side's turn could go by then.
+    apps.push(app(BEN, &views[3], |app| {
+        app.handle(Key::Up);
+        app.handle(Key::Enter);
+    }));
+    // A piece dragged, as a letter and as a picture.
+    for pictures in [false, true] {
+        apps.push(app(ANN, &views[3], move |app| {
+            if pictures {
+                app.show_pictures((8, 16));
+            }
+            drag_over(app, "g1", "f3");
+        }));
+    }
     apps.push(app(ANN, &views[3], |app| {
         app.show_pictures((8, 16));
         app.handle(Key::Up);

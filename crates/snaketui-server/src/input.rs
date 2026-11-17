@@ -140,21 +140,22 @@ enum Escape {
     Answer(Answer, usize),
 }
 
-/// A mouse report's `b;x;y`, with `M` for a press or `m` for a release:
-/// the left button only, at a 0-based cell.
+/// A mouse report's `b;x;y`, with `M` for a press or a move and `m` for a
+/// release: the left button only, at a 0-based cell.
 fn mouse(params: &[u8], fin: u8) -> Option<Key> {
     let text = std::str::from_utf8(params).ok()?;
     let mut parts = text.split(';').map(|p| p.parse::<u16>().ok());
     let (button, x, y) = (parts.next()??, parts.next()??, parts.next()??);
-    // Shift, Alt and Ctrl don't matter; motion, the wheel and the other
-    // buttons aren't used.
-    if button & !(4 | 8 | 16) != 0 || x == 0 || y == 0 {
+    if x == 0 || y == 0 {
         return None;
     }
-    let kind = if fin == b'M' {
-        MouseKind::Press
-    } else {
-        MouseKind::Release
+    // Shift, Alt and Ctrl don't matter; 32 is the left button held while
+    // the pointer moves. The wheel and the other buttons aren't used.
+    let kind = match (button & !(4 | 8 | 16), fin) {
+        (0, b'M') => MouseKind::Press,
+        (0, _) => MouseKind::Release,
+        (32, b'M') => MouseKind::Drag,
+        _ => return None,
     };
     Some(Key::Mouse(Mouse {
         kind,
@@ -348,6 +349,32 @@ impl Budget {
     }
 }
 
+/// Keeps what of `keys` `budget` lets through at `now`. Where a drag got to
+/// is all that matters, so only the last of drags in a row is kept, and
+/// drags cost nothing: a quick drag can't use the budget up and lose the
+/// release that ends it.
+pub fn within_budget(keys: &mut Vec<Key>, budget: &mut Budget, now: Instant) {
+    let mut kept: Vec<Key> = Vec::with_capacity(keys.len());
+    for key in keys.drain(..) {
+        if key.is_drag() && kept.last().is_some_and(|k| k.is_drag()) {
+            kept.pop();
+        }
+        kept.push(key);
+    }
+    let mut left = budget.take(kept.iter().filter(|k| !k.is_drag()).count(), now);
+    kept.retain(|k| {
+        if k.is_drag() {
+            true
+        } else if left > 0 {
+            left -= 1;
+            true
+        } else {
+            false
+        }
+    });
+    *keys = kept;
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -370,6 +397,22 @@ mod tests {
             256,
             "never more than a burst"
         );
+    }
+
+    #[test]
+    fn drags_cost_nothing_and_only_where_they_got_to_counts() {
+        let start = Instant::now();
+        let mouse = |kind, x| Mouse(shell_tui::Mouse { kind, x, y: 0 });
+        let (press, release) = (mouse(MouseKind::Press, 0), mouse(MouseKind::Release, 9));
+        let drags = (1..9).map(|x| mouse(MouseKind::Drag, x));
+        let mut keys: Vec<Key> = [press].into_iter().chain(drags).chain([release]).collect();
+        let mut budget = Budget::new(2, 1, start);
+        within_budget(&mut keys, &mut budget, start);
+        assert_eq!(keys, [press, mouse(MouseKind::Drag, 8), release]);
+        // The budget spent, keys are dropped, but drags still go.
+        let mut keys = vec![Char('a'), mouse(MouseKind::Drag, 3), Char('b')];
+        within_budget(&mut keys, &mut budget, start);
+        assert_eq!(keys, [mouse(MouseKind::Drag, 3)]);
     }
 
     fn parse(chunks: &[&[u8]]) -> Vec<Key> {
@@ -525,17 +568,20 @@ mod tests {
     }
 
     #[test]
-    fn the_left_button_comes_as_presses_and_releases() {
+    fn the_left_button_comes_as_presses_drags_and_releases() {
         let at = |kind, x, y| Mouse(shell_tui::Mouse { kind, x, y });
-        // A press and release, a drag, the wheel, the right button, and a
-        // press with Shift.
-        let input = b"\x1b[<0;5;3M\x1b[<0;6;3m\x1b[<32;6;3M\x1b[<64;1;1M\x1b[<2;1;1M\x1b[<4;2;2M";
+        // A press and release, a drag, the wheel, the right button and a
+        // drag with it, and a press and drag with Shift.
+        let input = b"\x1b[<0;5;3M\x1b[<0;6;3m\x1b[<32;6;3M\x1b[<64;1;1M\x1b[<2;1;1M\
+            \x1b[<34;1;1M\x1b[<4;2;2M\x1b[<36;3;2M";
         assert_eq!(
             parse(&[input]),
             [
                 at(MouseKind::Press, 4, 2),
                 at(MouseKind::Release, 5, 2),
+                at(MouseKind::Drag, 5, 2),
                 at(MouseKind::Press, 1, 1),
+                at(MouseKind::Drag, 2, 1),
             ]
         );
         assert_eq!(

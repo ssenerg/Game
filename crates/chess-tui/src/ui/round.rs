@@ -296,7 +296,7 @@ impl Scene<'_> {
             && let Some(premove) = &desk.premove
         {
             let premove = match premove {
-                Premove::Squares(from, to) => format!("{from}{to}"),
+                Premove::Picked(mv) => mv.to_string(),
                 Premove::Typed(typed) => typed.clone(),
             };
             return Line::styled(
@@ -354,21 +354,21 @@ impl Scene<'_> {
             return marks;
         };
         marks.cursor = desk.cursor;
-        if let Some(Premove::Squares(from, to)) = desk.premove {
-            marks.premove = Some((from, to));
+        if let Some(Premove::Picked(mv)) = desk.premove {
+            marks.premove = Some((mv.from, mv.to));
         }
         let mine = |sq| self.position.piece_at(sq).is_some_and(|(c, _)| c == me);
         if let Some(from) = desk.selected.filter(|&sq| mine(sq)) {
             marks.from.push(from);
             if self.my_turn() {
-                marks.to = self
-                    .position
-                    .legal_moves()
-                    .iter()
-                    .filter(|m| m.from == from)
-                    .map(|m| m.to)
-                    .collect();
+                marks.to = entry::destinations(&self.position, from);
+            } else if self.ui.prefs.premoves {
+                marks.to = entry::premove_destinations(&self.position, from);
             }
+            marks.lifted = desk
+                .dragging
+                .filter(|drag| drag.from == from)
+                .and_then(|drag| Some((from, drag.at?)));
         } else if self.my_turn() && !desk.typed.is_empty() {
             let found = entry::candidates(&self.position, &desk.typed);
             for m in found {

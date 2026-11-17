@@ -54,8 +54,8 @@ impl Repeats {
     }
 }
 
-/// The left button went down or came up at column `x`, row `y`, from the
-/// top left.
+/// The left button went down, moved while down, or came up at column `x`,
+/// row `y`, from the top left.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Mouse {
     pub kind: MouseKind,
@@ -66,6 +66,8 @@ pub struct Mouse {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MouseKind {
     Press,
+    /// The pointer moved to another cell with the button down.
+    Drag,
     Release,
 }
 
@@ -77,6 +79,17 @@ impl Mouse {
 }
 
 impl Key {
+    /// Whether it's the mouse moving with its button down.
+    pub fn is_drag(self) -> bool {
+        matches!(
+            self,
+            Key::Mouse(Mouse {
+                kind: MouseKind::Drag,
+                ..
+            })
+        )
+    }
+
     /// Moves `selected` up or down a list of `len` rows, wrapping around;
     /// `None` if this key doesn't move it.
     pub fn step(self, selected: usize, len: usize) -> Option<usize> {

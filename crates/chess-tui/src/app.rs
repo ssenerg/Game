@@ -211,10 +211,21 @@ pub const PROMOTIONS: [Piece; 4] = Piece::PROMOTIONS;
 /// player's comes, if it's legal then.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Premove {
-    /// From one square to another, as picked.
-    Squares(Square, Square),
+    /// As picked: a move, its promotion chosen if a pawn reaches the end,
+    /// or none for a queen.
+    Picked(Move),
     /// As typed.
     Typed(String),
+}
+
+/// A piece the mouse has lifted, while its button is down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Drag {
+    pub from: Square,
+    /// Where the pointer is, once it has moved.
+    pub at: Option<(u16, u16)>,
+    /// It was picked up already: let go where it was, it's put down.
+    pub was_picked: bool,
 }
 
 /// How the player is entering their move, and what they've opened, during
@@ -234,7 +245,7 @@ pub(crate) struct Desk {
     /// The board turned around from how it's usually seen.
     pub flipped: bool,
     /// The piece the mouse picked up, while its button is down.
-    pub dragging: Option<Square>,
+    pub dragging: Option<Drag>,
     /// The move waiting for the player's turn.
     pub premove: Option<Premove>,
     /// What went wrong with the last try.
@@ -433,44 +444,95 @@ impl ChessUi {
     }
 
     /// Picks up one of `me`'s pieces at `at`, or moves the one picked up
-    /// there.
+    /// there: now in `me`'s turn, or as a premove in the other side's.
     fn pick_at(&mut self, at: Square, position: &Position, me: piece::Color) -> Reply {
         let mine = position.piece_at(at).is_some_and(|(c, _)| c == me);
+        let my_turn = position.side_to_move() == me;
         match self.desk.selected {
             Some(from) if from == at => self.desk.selected = None,
-            _ if mine => self.desk.selected = Some(at),
-            Some(from) if position.side_to_move() != me => {
-                if self.prefs.premoves {
-                    self.desk.premove = Some(Premove::Squares(from, at));
+            Some(from) if !my_turn && self.prefs.premoves => {
+                // Onto any square it could reach by then, its own side's
+                // included: a piece there may be taken first.
+                if entry::premove_destinations(position, from).contains(&at) {
                     self.desk.selected = None;
+                    let to = entry::landing(position, from, at);
+                    if entry::promotes(position, from, to) && !self.prefs.auto_queen {
+                        self.desk.promoting = Some((from, to, 0));
+                    } else {
+                        let mv = Move {
+                            from,
+                            to,
+                            promotion: None,
+                        };
+                        self.desk.premove = Some(Premove::Picked(mv));
+                    }
+                } else if mine {
+                    self.desk.selected = Some(at);
                 } else {
-                    self.desk.notice = Some(NOT_YET);
+                    self.desk.selected = None;
+                    self.desk.notice = Some(CANT_GO);
+                }
+            }
+            Some(_) if !my_turn && !mine => self.desk.notice = Some(NOT_YET),
+            Some(from) if mine => {
+                // The king put down on its rook castles; another piece is
+                // picked up instead.
+                let to = entry::landing(position, from, at);
+                let castles = entry::between(position, from, to);
+                match castles.first() {
+                    Some(&mv) if to != at && my_turn => return self.play(mv),
+                    _ => self.desk.selected = Some(at),
                 }
             }
             Some(from) => {
                 let moves = entry::between(position, from, at);
                 let entered = entry::choose(&moves, self.prefs.auto_queen)
-                    .unwrap_or(Entered::Refused("That piece can't go there."));
+                    .unwrap_or(Entered::Refused(CANT_GO));
                 if matches!(entered, Entered::Refused(_)) {
                     self.desk.selected = None;
                 }
                 return self.entered(entered);
             }
+            None if mine => self.desk.selected = Some(at),
             // Anywhere else, a premove is called off.
             None => self.desk.premove = None,
         }
         Reply::default()
     }
 
+    /// The piece chosen for a pawn reaching the end: played in `me`'s
+    /// turn, if it still can be, or kept as a premove in the other side's.
+    fn promote(&mut self, mv: Move, position: &Position, me: piece::Color) -> Reply {
+        self.desk.promoting = None;
+        self.desk.selected = None;
+        if position.side_to_move() != me {
+            self.desk.premove = Some(Premove::Picked(mv));
+            Reply::default()
+        } else if position.is_legal(mv) {
+            self.play(mv)
+        } else {
+            self.desk.notice = Some(CANT_GO);
+            Reply::default()
+        }
+    }
+
     /// The move kept for `me`'s turn in `position`, now it has come: played
-    /// if it's legal, a pawn reaching the end becoming a queen.
+    /// if it's legal, a pawn reaching the end becoming what was chosen, or
+    /// a queen.
     fn premove(&mut self, position: &Position) -> Vec<GameFx> {
         let Some(premove) = self.desk.premove.take() else {
             return Vec::new();
         };
         let entered = match &premove {
-            Premove::Squares(from, to) => {
-                entry::choose(&entry::between(position, *from, *to), true)
+            Premove::Picked(mv) => {
+                let moves = entry::between(position, mv.from, mv.to);
+                match mv.promotion {
+                    Some(piece) => moves
+                        .into_iter()
+                        .find(|m| m.promotion == Some(piece))
+                        .map(Entered::Play),
+                    None => entry::choose(&moves, true),
+                }
             }
             Premove::Typed(text) => Some(entry::enter(position, text, true)),
         };
@@ -513,11 +575,14 @@ impl ChessUi {
                 }
             };
             return match chosen {
-                Some(i) => self.play(Move {
-                    from,
-                    to,
-                    promotion: Some(PROMOTIONS[i]),
-                }),
+                Some(i) => {
+                    let mv = Move {
+                        from,
+                        to,
+                        promotion: Some(PROMOTIONS[i]),
+                    };
+                    self.promote(mv, &position, me)
+                }
                 None => Reply::default(),
             };
         }
@@ -591,25 +656,58 @@ impl ChessUi {
         me: piece::Color,
     ) -> Reply {
         let hit = self.hits.at(mouse);
-        // A release keeps what its press said.
-        if mouse.kind == MouseKind::Release {
-            return match (self.desk.dragging.take(), hit) {
-                (Some(from), Some(Hit::Square(to)))
-                    if to != from && self.desk.selected == Some(from) =>
-                {
-                    self.pick_at(to, position, me)
+        match mouse.kind {
+            MouseKind::Press => {}
+            // A lifted piece follows the pointer.
+            MouseKind::Drag => {
+                if let Some(drag) = &mut self.desk.dragging {
+                    drag.at = Some((mouse.x, mouse.y));
                 }
-                _ => Reply::default(),
-            };
+                return Reply::default();
+            }
+            // A release keeps what its press said.
+            MouseKind::Release => {
+                let Some(drag) = self.desk.dragging.take() else {
+                    return Reply::default();
+                };
+                if self.desk.selected != Some(drag.from) {
+                    return Reply::default();
+                }
+                return match hit {
+                    Some(Hit::Square(to)) if to != drag.from => {
+                        let reply = self.pick_at(to, position, me);
+                        // Dropped on another of the player's pieces it
+                        // can't go to: put down, without picking that up.
+                        if self.desk.selected == Some(to) {
+                            self.desk.selected = None;
+                        }
+                        reply
+                    }
+                    // Let go where it was: picked up by this press, it
+                    // stays so; picked up before, it's put down.
+                    Some(Hit::Square(_)) => {
+                        if drag.was_picked {
+                            self.desk.selected = None;
+                        }
+                        Reply::default()
+                    }
+                    // Off the board: it goes back.
+                    _ => {
+                        self.desk.selected = None;
+                        Reply::default()
+                    }
+                };
+            }
         }
         self.desk.notice = None;
         if let Some((from, to, _)) = self.desk.promoting {
             if let Some(Hit::Promote(i)) = hit {
-                return self.play(Move {
+                let mv = Move {
                     from,
                     to,
                     promotion: Some(PROMOTIONS[i]),
-                });
+                };
+                return self.promote(mv, position, me);
             }
             self.desk.promoting = None;
             return Reply::default();
@@ -636,10 +734,21 @@ impl ChessUi {
                 Reply::default()
             }
             Some(Hit::Square(at)) => {
-                let reply = self.pick_at(at, position, me);
-                // Just picked up: it may be dragged, too.
+                // Pressed on the piece picked up, it's lifted again, and
+                // put down only if let go there.
+                let was_picked = self.desk.selected == Some(at);
+                let reply = if was_picked {
+                    Reply::default()
+                } else {
+                    self.pick_at(at, position, me)
+                };
+                // Picked up: it may be dragged, too.
                 if self.desk.selected == Some(at) {
-                    self.desk.dragging = Some(at);
+                    self.desk.dragging = Some(Drag {
+                        from: at,
+                        at: None,
+                        was_picked,
+                    });
                 }
                 reply
             }
@@ -836,6 +945,7 @@ fn bottom_of(me: piece::Color, flipped: bool) -> piece::Color {
 }
 
 const NOT_YET: &str = "Wait for your move.";
+const CANT_GO: &str = "That piece can't go there.";
 
 impl GameUi for ChessUi {
     fn id(&self) -> GameId {

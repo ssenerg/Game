@@ -100,6 +100,13 @@ impl Position {
         Square::from_cozy(self.board.king(color.to_cozy()))
     }
 
+    /// Whether `color` may still castle short and long some day: neither
+    /// its king nor that rook has moved, and the rook wasn't taken.
+    pub fn castling_rights(&self, color: Color) -> (bool, bool) {
+        let rights = self.board.castle_rights(color.to_cozy());
+        (rights.short.is_some(), rights.long.is_some())
+    }
+
     /// Moves since the last capture or pawn move, counting both sides'.
     /// cozy-chess stops counting at 100, the fifty-move rule's limit.
     pub fn halfmove_clock(&self) -> u32 {

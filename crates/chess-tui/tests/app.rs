@@ -828,6 +828,166 @@ fn a_premove_can_be_called_off_or_turned_off() {
     assert_eq!(inputs(&moved(&mut app, playing(&["e2e4"]))), []);
 }
 
+#[test]
+fn a_premove_can_take_back_on_your_own_pieces_square() {
+    // After 1.e4 d5, Ben waits for exd5 to take back with his queen.
+    let opening = ["e2e4", "d7d5"];
+    let taken = ["e2e4", "d7d5", "e4d5"];
+    let mut app = app_in(BEN, playing(&opening).view());
+    click(&mut app, Hit::Square(square("d8")));
+    assert_eq!(inputs(&click(&mut app, Hit::Square(square("d5")))), []);
+    assert_eq!(chess(&mut app).picked(), None, "not his pawn picked up");
+    let screen = shown(&app, 80, 24);
+    assert!(screen.contains("Premove d8d5"), "{screen}");
+    assert_eq!(inputs(&moved(&mut app, playing(&taken))), [uci("d8d5")]);
+
+    // Dragged there, too.
+    let mut app = app_in(BEN, playing(&opening).view());
+    mouse(&mut app, MouseKind::Press, Hit::Square(square("d8")));
+    mouse(&mut app, MouseKind::Release, Hit::Square(square("d5")));
+    assert_eq!(inputs(&moved(&mut app, playing(&taken))), [uci("d8d5")]);
+
+    // A queen's premove reaches past pieces in the way, which may be gone
+    // by then; it's checked only when his turn comes.
+    let mut app = app_in(BEN, playing(&opening).view());
+    click(&mut app, Hit::Square(square("d8")));
+    click(&mut app, Hit::Square(square("d2")));
+    assert!(shown(&app, 80, 24).contains("Premove d8d2"));
+    assert_eq!(inputs(&moved(&mut app, playing(&taken))), []);
+    assert!(shown(&app, 80, 24).contains("Your premove wasn't legal by then."));
+
+    // One of his pieces the queen can't reach is picked up instead, and a
+    // square his piece can't reach is refused.
+    let mut app = app_in(BEN, playing(&opening).view());
+    click(&mut app, Hit::Square(square("d8")));
+    click(&mut app, Hit::Square(square("h7")));
+    assert_eq!(chess(&mut app).picked(), Some(square("h7")));
+    click(&mut app, Hit::Square(square("h3")));
+    let screen = shown(&app, 80, 24);
+    assert!(screen.contains("That piece can't go there."), "{screen}");
+    assert_eq!(chess(&mut app).picked(), None);
+    assert_eq!(inputs(&moved(&mut app, playing(&taken))), [], "no premove");
+}
+
+#[test]
+fn the_king_put_down_on_its_rook_castles_now_or_as_a_premove() {
+    let opening = ["e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "g8f6"];
+    let mut app = app_in(ANN, playing(&opening).view());
+    click(&mut app, Hit::Square(square("e1")));
+    assert_eq!(
+        inputs(&click(&mut app, Hit::Square(square("h1")))),
+        [uci("e1g1")]
+    );
+    // A rook it can't castle with yet is picked up instead.
+    let mut app = app_in(ANN, playing(&opening).view());
+    click(&mut app, Hit::Square(square("e1")));
+    assert_eq!(inputs(&click(&mut app, Hit::Square(square("a1")))), []);
+    assert_eq!(chess(&mut app).picked(), Some(square("a1")));
+    // In black's turn, castling waits for hers.
+    let mut app = app_in(ANN, playing(&opening[..5]).view());
+    mouse(&mut app, MouseKind::Press, Hit::Square(square("e1")));
+    mouse(&mut app, MouseKind::Release, Hit::Square(square("h1")));
+    assert!(shown(&app, 80, 24).contains("Premove e1g1"));
+    assert_eq!(inputs(&moved(&mut app, playing(&opening))), [uci("e1g1")]);
+}
+
+/// The view of a game under way from `fen`, with these moves after it.
+fn from_fen(
+    fen: &str,
+    moves: &[&str],
+) -> std::sync::Arc<game_api::RoomView<chess_core::round::Chess>> {
+    let mut view = playing(&[]).view();
+    let game = view.game.as_mut().unwrap();
+    game.start = Some(fen.into());
+    game.moves = moves
+        .iter()
+        .map(|m| Move::parse_uci(m).unwrap().pack())
+        .collect();
+    std::sync::Arc::new(view)
+}
+
+#[test]
+fn a_premoved_pawn_becomes_what_was_chosen_for_it() {
+    // White to move; Ben's pawn is a step from the end.
+    let fen = "8/8/8/8/8/8/4p3/K6k w - - 0 1";
+    let mut app = app_in(BEN, (*from_fen(fen, &[])).clone());
+    chess(&mut app).prefs.auto_queen = false;
+    click(&mut app, Hit::Square(square("e2")));
+    click(&mut app, Hit::Square(square("e1")));
+    assert!(shown(&app, 80, 24).contains("Promote to"));
+    assert_eq!(inputs(&typed(&mut app, "n")), []);
+    assert!(shown(&app, 80, 24).contains("Premove e2e1n"));
+    let played = app.update_room(from_fen(fen, &["a1a2"]));
+    assert_eq!(inputs(&played), [uci("e2e1n")]);
+
+    // Queens without asking: no prompt.
+    let mut app = app_in(BEN, (*from_fen(fen, &[])).clone());
+    chess(&mut app).prefs.auto_queen = true;
+    click(&mut app, Hit::Square(square("e2")));
+    click(&mut app, Hit::Square(square("e1")));
+    assert!(!shown(&app, 80, 24).contains("Promote to"));
+    let played = app.update_room(from_fen(fen, &["a1a2"]));
+    assert_eq!(inputs(&played), [uci("e2e1q")]);
+}
+
+/// The app's screen, drawn on a `w`×`h` terminal, cell by cell.
+fn drawn(app: &App, w: u16, h: u16) -> ratatui::buffer::Buffer {
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+    terminal
+        .draw(|frame| shell_tui::ui::draw(frame, app))
+        .unwrap();
+    terminal.backend().buffer().clone()
+}
+
+#[test]
+fn a_dragged_piece_follows_the_pointer() {
+    let mut app = app_in(ANN, playing(&[]).view());
+    mouse(&mut app, MouseKind::Press, Hit::Square(square("g1")));
+    let spot = |app: &mut App, name| chess(app).hits.spot(Hit::Square(square(name))).unwrap();
+    // Where a piece is drawn on its square.
+    let g1 = spot(&mut app, "g1");
+    let g1 = (g1.x + (g1.width - 1) / 2, g1.y + (g1.height - 1) / 2);
+    // Over f3's top left corner, off its middle: the knight is right
+    // there, and shows faintly where it was.
+    let f3 = spot(&mut app, "f3");
+    let corner = (f3.x, f3.y);
+    mouse_at(&mut app, MouseKind::Drag, corner);
+    let buf = drawn(&app, 80, 24);
+    assert_eq!(buf[corner].symbol(), "♞");
+    assert_eq!(
+        buf[corner].bg,
+        ratatui::style::Color::Indexed(215),
+        "f3 lit"
+    );
+    assert_eq!(buf[g1].symbol(), "♞");
+    assert_eq!(buf[g1].fg, ratatui::style::Color::Indexed(242), "faint");
+    assert_eq!(
+        inputs(&mouse_at(&mut app, MouseKind::Release, corner)),
+        [uci("g1f3")]
+    );
+
+    // Picked up, then pressed and let go on it again: put down.
+    let mut app = app_in(ANN, playing(&[]).view());
+    click(&mut app, Hit::Square(square("e2")));
+    assert_eq!(chess(&mut app).picked(), Some(square("e2")));
+    click(&mut app, Hit::Square(square("e2")));
+    assert_eq!(chess(&mut app).picked(), None);
+    // Picked up again and dragged elsewhere instead: it goes.
+    click(&mut app, Hit::Square(square("e2")));
+    mouse(&mut app, MouseKind::Press, Hit::Square(square("e2")));
+    let dropped = mouse(&mut app, MouseKind::Release, Hit::Square(square("e4")));
+    assert_eq!(inputs(&dropped), [uci("e2e4")]);
+
+    // Dropped on another of hers, or off the board: put back down.
+    let mut app = app_in(ANN, playing(&[]).view());
+    mouse(&mut app, MouseKind::Press, Hit::Square(square("e2")));
+    mouse(&mut app, MouseKind::Release, Hit::Square(square("d2")));
+    assert_eq!(chess(&mut app).picked(), None, "d2 isn't picked up");
+    mouse(&mut app, MouseKind::Press, Hit::Square(square("e2")));
+    mouse_at(&mut app, MouseKind::Release, (79, 23));
+    assert_eq!(chess(&mut app).picked(), None);
+}
+
 /// A quick-play match, over: Ann resigned to the computer.
 fn lost_to_the_computer() -> std::sync::Arc<dyn game_api::AnyView> {
     use game_api::{Game, PhaseView, Room, RoomKind, RoomSettings};
